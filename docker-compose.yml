@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  aria2:
+    image: p3terx/aria2-pro
+    container_name: aria2
+    environment:
+      - RPC_SECRET=YourSuperSecretToken
+      - RPC_PORT=6800
+      - LISTEN_PORT=6881
+      - DISK_CACHE=64M
+      - IPV6_TRACKERS=false
+      - UMASK_SET=022
+    volumes:
+      # Configurations
+      - ./aria2-config:/config
+      # Download root dir - shared with the bot container
+      - shared-downloads:/downloads
+    ports:
+      - "6800:6800"
+      - "6881:6881"
+      - "6881:6881/udp"
+    restart: unless-stopped
+
+  bot:
+    build: .
+    container_name: telegram-mirror-bot
+    depends_on:
+      - aria2
+    environment:
+      - TELEGRAM_BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
+      - TELEGRAM_ALLOWED_CHAT_ID=YOUR_CHAT_ID
+      - ARIA2_RPC_URL=http://aria2:6800/jsonrpc
+      - ARIA2_RPC_SECRET=YourSuperSecretToken
+      - DOWNLOAD_DIR=/downloads/temp
+      - DESTINATION_DIR=/downloads/completed
+      - UPDATE_INTERVAL=3
+    volumes:
+      # Mount the same volume to easily move files locally
+      - shared-downloads:/downloads
+    restart: unless-stopped
+
+volumes:
+  shared-downloads:
+    driver: local
