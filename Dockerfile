@@ -14,7 +14,7 @@ RUN swift build -c release --static-swift-stdlib
 # ==============================================================================
 # Runtime Stage
 # ==============================================================================
-FROM swift:6.0-slim-jammy
+FROM swift:6.0-jammy-slim
 
 # Install additional runtime dependencies if needed
 RUN apt-get update && apt-get install -y \
