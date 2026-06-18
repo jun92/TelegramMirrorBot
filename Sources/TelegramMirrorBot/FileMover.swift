@@ -114,9 +114,9 @@ public actor FileMover {
                 
                 bytesCopied += Int64(bytesRead)
                 
-                // Throttle progress updates (max once per 500ms)
+                // Throttle progress updates (max once per 3000ms)
                 let now = Date()
-                if now.timeIntervalSince(lastReportTime) >= 0.5 || bytesCopied == totalSize {
+                if now.timeIntervalSince(lastReportTime) >= 3.0 || bytesCopied == totalSize {
                     let fraction = Double(bytesCopied) / Double(totalSize)
                     progressHandler(fraction, bytesCopied, totalSize)
                     lastReportTime = now

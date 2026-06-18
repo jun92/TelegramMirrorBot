@@ -111,8 +111,9 @@ public actor MirrorDaemon {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             let isMagnet = trimmed.lowercased().hasPrefix("magnet:?")
             let isHttp = trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://")
-            
             if isMagnet || isHttp {
+                // Delete user's original link message to clean up the chat
+                try? await bot.deleteMessage(chatId: chatId, messageId: message.messageId)
                 await handleNewDownloadRequest(uri: trimmed, chatId: chatId)
             } else {
                 try? await bot.sendMessage(chatId: chatId, text: "❌ 올바른 마그넷 링크 또는 파일 다운로드 링크를 입력해 주세요.")
@@ -199,9 +200,13 @@ public actor MirrorDaemon {
     private func monitorDownloadsLoop() async {
         while isRunning {
             let tasks = activeTasks
-            for (_, task) in tasks {
-                if task.phase == .downloading {
-                    await updateDownloadProgress(task: task)
+            await withTaskGroup(of: Void.self) { group in
+                for (_, task) in tasks {
+                    if task.phase == .downloading {
+                        group.addTask {
+                            await self.updateDownloadProgress(task: task)
+                        }
+                    }
                 }
             }
             try? await Task.sleep(nanoseconds: UInt64(updateInterval * 1_000_000_000))
