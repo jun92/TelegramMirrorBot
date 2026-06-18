@@ -47,6 +47,11 @@ struct TelegramMirrorBot {
         let updateInterval = TimeInterval(updateIntervalStr) ?? 3.0
         print("Update Interval: \(updateInterval) seconds")
         
+        // 7. Get Max Concurrent Downloads
+        let maxConcurrentStr = env["MAX_CONCURRENT_DOWNLOADS"] ?? "3"
+        let maxConcurrentDownloads = Int(maxConcurrentStr) ?? 3
+        print("Max Concurrent Downloads: \(maxConcurrentDownloads)")
+        
         // Initialize Clients
         let aria2 = Aria2Client(rpcURL: rpcURL, secret: rpcSecret)
         let bot = TelegramBot(token: telegramToken)
@@ -57,6 +62,7 @@ struct TelegramMirrorBot {
             downloadDir: downloadDir,
             destinationDir: destinationDir,
             updateInterval: updateInterval,
+            maxConcurrentDownloads: maxConcurrentDownloads,
             allowedChatId: allowedChatId
         )
         

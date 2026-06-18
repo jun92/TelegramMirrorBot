@@ -35,6 +35,7 @@ services:
       - DOWNLOAD_DIR=/downloads
       - DESTINATION_DIR=/sync
       - UPDATE_INTERVAL=3
+      - MAX_CONCURRENT_DOWNLOADS=3
     volumes:
       # Mount the same host downloads folder to easily move files locally
       - ./downloads:/downloads

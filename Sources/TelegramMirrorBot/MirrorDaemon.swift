@@ -2,6 +2,7 @@ import Foundation
 
 public struct MirrorTask: Sendable {
     public enum Phase: String, Sendable {
+        case pending
         case downloading
         case moving
         case completed
@@ -9,7 +10,8 @@ public struct MirrorTask: Sendable {
         case cancelled
     }
     
-    public let gid: String
+    public let gid: String // Temporary UUID for pending, actual GID for downloading
+    public let uri: String // Original magnet / link
     public let chatId: Int64
     public let messageId: Int
     public var phase: Phase
@@ -24,9 +26,11 @@ public actor MirrorDaemon {
     private let downloadDir: String
     private let destinationDir: String
     private let updateInterval: TimeInterval
+    private let maxConcurrentDownloads: Int
     private let allowedChatId: Int64? // Optional restriction to a single Telegram Chat ID
     
     private var activeTasks: [String: MirrorTask] = [:]
+    private var pendingQueue: [String] = [] // Queue of temporary task UUIDs
     private var isRunning: Bool = false
     
     public init(
@@ -35,6 +39,7 @@ public actor MirrorDaemon {
         downloadDir: String,
         destinationDir: String,
         updateInterval: TimeInterval = 3.0,
+        maxConcurrentDownloads: Int = 3,
         allowedChatId: Int64? = nil
     ) {
         self.aria2 = aria2
@@ -43,6 +48,7 @@ public actor MirrorDaemon {
         self.downloadDir = downloadDir
         self.destinationDir = destinationDir
         self.updateInterval = updateInterval
+        self.maxConcurrentDownloads = maxConcurrentDownloads
         self.allowedChatId = allowedChatId
     }
     
@@ -132,33 +138,81 @@ public actor MirrorDaemon {
     
     private func handleNewDownloadRequest(uri: String, chatId: Int64) async {
         do {
-            let initialMsg = try await bot.sendMessage(chatId: chatId, text: "⏳ aria2c 데몬에 요청을 추가하는 중...")
+            let downloadingCount = activeTasks.values.filter { $0.phase == .downloading }.count
             
-            let gid = try await aria2.addUri(uri, downloadDir: downloadDir)
-            
-            // Check status immediately to get file name
-            let status = try await aria2.tellStatus(gid)
-            let fileName = getFileName(from: status)
-            
-            let loadingText = """
-            📥 **다운로드 준비 중...**
-            파일명: \(fileName)
-            """
-            
-            let markup = InlineKeyboardMarkup(inlineKeyboard: [
-                [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(gid)")]
-            ])
-            
-            try? await bot.editMessageText(chatId: chatId, messageId: initialMsg.messageId, text: loadingText, replyMarkup: markup)
-            
-            activeTasks[gid] = MirrorTask(
-                gid: gid,
-                chatId: chatId,
-                messageId: initialMsg.messageId,
-                phase: .downloading,
-                lastStatusText: loadingText
-            )
-            print("Successfully added download task. GID: \(gid), File: \(fileName)")
+            if downloadingCount < maxConcurrentDownloads {
+                let initialMsg = try await bot.sendMessage(chatId: chatId, text: "⏳ aria2c 데몬에 요청을 추가하는 중...")
+                
+                let gid = try await aria2.addUri(uri, downloadDir: downloadDir)
+                
+                // Check status immediately to get file name
+                let status = try await aria2.tellStatus(gid)
+                let fileName = getFileName(from: status)
+                
+                let loadingText = """
+                📥 **다운로드 준비 중...**
+                파일명: \(fileName)
+                """
+                
+                let markup = InlineKeyboardMarkup(inlineKeyboard: [
+                    [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(gid)")]
+                ])
+                
+                try? await bot.editMessageText(chatId: chatId, messageId: initialMsg.messageId, text: loadingText, replyMarkup: markup)
+                
+                activeTasks[gid] = MirrorTask(
+                    gid: gid,
+                    uri: uri,
+                    chatId: chatId,
+                    messageId: initialMsg.messageId,
+                    phase: .downloading,
+                    lastStatusText: loadingText
+                )
+                print("Successfully added download task. GID: \(gid), File: \(fileName)")
+            } else {
+                let initialMsg = try await bot.sendMessage(chatId: chatId, text: "⏳ 대기열 추가 중...")
+                let tempId = "pending_" + UUID().uuidString
+                let queuePos = pendingQueue.count + 1
+                
+                let nameLabel: String
+                if uri.lowercased().hasPrefix("magnet:?") {
+                    if let range = uri.range(of: "dn=") {
+                        let sub = uri[range.upperBound...]
+                        let rawName = sub.split(separator: "&").first ?? "Magnet Link"
+                        nameLabel = String(rawName).removingPercentEncoding ?? "Magnet Link"
+                    } else {
+                        nameLabel = "Magnet Link"
+                    }
+                } else if let url = URL(string: uri) {
+                    nameLabel = url.lastPathComponent
+                } else {
+                    nameLabel = "Unknown File"
+                }
+                
+                let pendingText = """
+                ⏳ **다운로드 대기 중...**
+                
+                📁 **파일명:** \(nameLabel)
+                📋 **대기 순서:** \(queuePos)번째 대기 중
+                """
+                
+                let markup = InlineKeyboardMarkup(inlineKeyboard: [
+                    [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(tempId)")]
+                ])
+                
+                try? await bot.editMessageText(chatId: chatId, messageId: initialMsg.messageId, text: pendingText, replyMarkup: markup)
+                
+                activeTasks[tempId] = MirrorTask(
+                    gid: tempId,
+                    uri: uri,
+                    chatId: chatId,
+                    messageId: initialMsg.messageId,
+                    phase: .pending,
+                    lastStatusText: pendingText
+                )
+                pendingQueue.append(tempId)
+                print("Download slot limit reached. Added task to pending queue. TempID: \(tempId), File: \(nameLabel)")
+            }
             
         } catch {
             print("Failed to add download: \(error)")
@@ -173,18 +227,35 @@ public actor MirrorDaemon {
         }
         
         do {
+            if task.phase == .pending {
+                // Remove from pendingQueue and activeTasks
+                pendingQueue.removeAll { $0 == gid }
+                activeTasks.removeValue(forKey: gid)
+                
+                let cancelledText = "❌ 대기 중 취소되었습니다."
+                try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
+                
+                // Recalculate queue positions
+                await updatePendingTasksQueuePositions()
+                
+                try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "대기열에서 성공적으로 취소되었습니다.")
+                print("Pending task cancelled by user. TempID: \(gid)")
+                return
+            }
+            
             if task.phase == .downloading {
                 _ = try await aria2.remove(gid)
             }
-            // For files already in file-moving phase, the transfer cannot be cleanly aborted midway, 
-            // but we can set it to cancelled so we don't proceed with further steps.
             
             task.phase = .cancelled
             activeTasks[gid] = task
             
             let cancelledText = "❌ 사용자에 의해 다운로드가 취소되었습니다."
             try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
-            try? await aria2.purgeDownloadResult(gid)
+            
+            if task.phase == .downloading {
+                try? await aria2.purgeDownloadResult(gid)
+            }
             activeTasks.removeValue(forKey: gid)
             
             try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "성공적으로 취소되었습니다.")
@@ -199,6 +270,10 @@ public actor MirrorDaemon {
     
     private func monitorDownloadsLoop() async {
         while isRunning {
+            // 1. Promote pending tasks if slots are available
+            await promotePendingTasks()
+            
+            // 2. Monitor active downloading tasks
             let tasks = activeTasks
             await withTaskGroup(of: Void.self) { group in
                 for (_, task) in tasks {
@@ -210,6 +285,95 @@ public actor MirrorDaemon {
                 }
             }
             try? await Task.sleep(nanoseconds: UInt64(updateInterval * 1_000_000_000))
+        }
+    }
+    
+    private func promotePendingTasks() async {
+        var downloadingCount = activeTasks.values.filter { $0.phase == .downloading }.count
+        
+        while downloadingCount < maxConcurrentDownloads && !pendingQueue.isEmpty {
+            let tempId = pendingQueue.removeFirst()
+            guard let task = activeTasks[tempId] else { continue }
+            
+            print("Promoting task \(tempId) from pending queue to active download.")
+            
+            do {
+                let startingText = "⏳ **다운로드 시작 중...**"
+                try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: startingText, replyMarkup: nil)
+                
+                let gid = try await aria2.addUri(task.uri, downloadDir: downloadDir)
+                
+                let status = try await aria2.tellStatus(gid)
+                let fileName = getFileName(from: status)
+                
+                let loadingText = """
+                📥 **다운로드 준비 중...**
+                파일명: \(fileName)
+                """
+                
+                let markup = InlineKeyboardMarkup(inlineKeyboard: [
+                    [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(gid)")]
+                ])
+                try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: loadingText, replyMarkup: markup)
+                
+                let newTask = MirrorTask(
+                    gid: gid,
+                    uri: task.uri,
+                    chatId: task.chatId,
+                    messageId: task.messageId,
+                    phase: .downloading,
+                    lastStatusText: loadingText
+                )
+                
+                activeTasks.removeValue(forKey: tempId)
+                activeTasks[gid] = newTask
+                
+                downloadingCount += 1
+            } catch {
+                print("Failed to promote task \(tempId): \(error)")
+                let failText = "❌ 대기열에서 다운로드 시작 실패: \(error.localizedDescription)"
+                try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: failText, replyMarkup: nil)
+                activeTasks.removeValue(forKey: tempId)
+            }
+        }
+        
+        await updatePendingTasksQueuePositions()
+    }
+    
+    private func updatePendingTasksQueuePositions() async {
+        for (index, tempId) in pendingQueue.enumerated() {
+            guard var task = activeTasks[tempId] else { continue }
+            let queuePos = index + 1
+            
+            let nameLabel: String
+            if task.uri.lowercased().hasPrefix("magnet:?") {
+                if let range = task.uri.range(of: "dn=") {
+                    let sub = task.uri[range.upperBound...]
+                    let rawName = sub.split(separator: "&").first ?? "Magnet Link"
+                    nameLabel = String(rawName).removingPercentEncoding ?? "Magnet Link"
+                } else {
+                    nameLabel = "Magnet Link"
+                }
+            } else if let url = URL(string: task.uri) {
+                nameLabel = url.lastPathComponent
+            } else {
+                nameLabel = "Unknown File"
+            }
+            
+            let pendingText = """
+            ⏳ **다운로드 대기 중...**
+            
+            📁 **파일명:** \(nameLabel)
+            📋 **대기 순서:** \(queuePos)번째 대기 중
+            """
+            
+            task.lastStatusText = pendingText
+            activeTasks[tempId] = task
+            
+            let markup = InlineKeyboardMarkup(inlineKeyboard: [
+                [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(tempId)")]
+            ])
+            try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: pendingText, replyMarkup: markup)
         }
     }
     
@@ -261,6 +425,7 @@ public actor MirrorDaemon {
                     // Create a new task mapping the new GID since MirrorTask.gid is immutable (let)
                     let newTask = MirrorTask(
                         gid: newGid,
+                        uri: task.uri,
                         chatId: task.chatId,
                         messageId: task.messageId,
                         phase: .downloading,
