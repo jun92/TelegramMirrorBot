@@ -253,9 +253,14 @@ public actor MirrorDaemon {
                 if let followedBy = status.followedBy, !followedBy.isEmpty, let newGid = followedBy.first {
                     print("Metadata download complete for GID: \(task.gid). Switching to actual download GID: \(newGid)")
                     
-                    // Update the task to point to the new GID and reset lastStatusText
-                    var newTask = task
-                    newTask.lastStatusText = "📥 **메타데이터 파싱 완료, 실제 다운로드 시작 중...**"
+                    // Create a new task mapping the new GID since MirrorTask.gid is immutable (let)
+                    let newTask = MirrorTask(
+                        gid: newGid,
+                        chatId: task.chatId,
+                        messageId: task.messageId,
+                        phase: .downloading,
+                        lastStatusText: "📥 **메타데이터 파싱 완료, 실제 다운로드 시작 중...**"
+                    )
                     
                     // Replace the active task GID mapping
                     activeTasks.removeValue(forKey: task.gid)

@@ -14,8 +14,8 @@ services:
     volumes:
       # Configurations
       - ./aria2-config:/config
-      # Download root dir - shared with the bot container
-      - shared-downloads:/downloads
+      # Download root dir - bind-mounted to host ./downloads
+      - ./downloads:/downloads
     ports:
       - "8210:8210"
       - "6881:6881"
@@ -23,7 +23,7 @@ services:
     restart: unless-stopped
 
   bot:
-    image: ghcr.io/jun92/telegrammirrorbot:sha-5e3a9f5
+    image: ghcr.io/jun92/telegrammirrorbot:latest
     container_name: telegram-mirror-bot
     depends_on:
       - aria2
@@ -32,14 +32,12 @@ services:
       - TELEGRAM_ALLOWED_CHAT_ID=YOUR_CHAT_ID
       - ARIA2_RPC_URL=http://aria2:8210/jsonrpc
       - ARIA2_RPC_SECRET=a1234567890
-      - DOWNLOAD_DIR=/downloads/temp
-      - DESTINATION_DIR=/downloads/completed
+      - DOWNLOAD_DIR=/downloads
+      - DESTINATION_DIR=/sync
       - UPDATE_INTERVAL=3
     volumes:
-      # Mount the same volume to easily move files locally
-      - shared-downloads:/downloads
+      # Mount the same host downloads folder to easily move files locally
+      - ./downloads:/downloads
+      # Mount sync folder to easily extract files on host
+      - ./sync:/sync
     restart: unless-stopped
-
-volumes:
-  shared-downloads:
-    driver: local
