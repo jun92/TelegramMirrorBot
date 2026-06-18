@@ -13,6 +13,7 @@ public struct Aria2Status: Codable, Sendable {
     public let errorCode: String?
     public let errorMessage: String?
     public let files: [Aria2File]
+    public let followedBy: [String]?
     
     public var totalSize: Int64 { Int64(totalLength) ?? 0 }
     public var completedSize: Int64 { Int64(completedLength) ?? 0 }
@@ -134,7 +135,7 @@ public actor Aria2Client {
     /// - Parameter gid: The download GID.
     /// - Returns: Aria2Status containing status, speed, sizes, files etc.
     public func tellStatus(_ gid: String) async throws -> Aria2Status {
-        let keys = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "errorCode", "errorMessage", "files"]
+        let keys = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "errorCode", "errorMessage", "files", "followedBy"]
         let extra: [AnyEncodable] = [
             AnyEncodable(gid),
             AnyEncodable(keys)

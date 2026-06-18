@@ -249,8 +249,29 @@ public actor MirrorDaemon {
                 }
                 
             } else if state == "complete" {
-                // Hand-off to file moving phase
-                await handleDownloadComplete(task: task, status: status)
+                // Check if this is a metadata (torrent file) download completion that is followed by the actual file download.
+                if let followedBy = status.followedBy, !followedBy.isEmpty, let newGid = followedBy.first {
+                    print("Metadata download complete for GID: \(task.gid). Switching to actual download GID: \(newGid)")
+                    
+                    // Update the task to point to the new GID and reset lastStatusText
+                    var newTask = task
+                    newTask.lastStatusText = "📥 **메타데이터 파싱 완료, 실제 다운로드 시작 중...**"
+                    
+                    // Replace the active task GID mapping
+                    activeTasks.removeValue(forKey: task.gid)
+                    activeTasks[newGid] = newTask
+                    
+                    // Clean up metadata result in aria2
+                    try? await aria2.purgeDownloadResult(task.gid)
+                    
+                    let markup = InlineKeyboardMarkup(inlineKeyboard: [
+                        [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(newGid)")]
+                    ])
+                    try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: newTask.lastStatusText, replyMarkup: markup)
+                } else {
+                    // Hand-off to file moving phase (actual file download complete)
+                    await handleDownloadComplete(task: task, status: status)
+                }
                 
             } else if state == "error" {
                 let errMsg = status.errorMessage ?? "알 수 없는 에러"

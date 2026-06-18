@@ -5,8 +5,8 @@ services:
     image: p3terx/aria2-pro
     container_name: aria2
     environment:
-      - RPC_SECRET=YourSuperSecretToken
-      - RPC_PORT=6800
+      - RPC_SECRET=a1234567890
+      - RPC_PORT=8210
       - LISTEN_PORT=6881
       - DISK_CACHE=64M
       - IPV6_TRACKERS=false
@@ -17,7 +17,7 @@ services:
       # Download root dir - shared with the bot container
       - shared-downloads:/downloads
     ports:
-      - "6800:6800"
+      - "8210:8210"
       - "6881:6881"
       - "6881:6881/udp"
     restart: unless-stopped
@@ -30,8 +30,8 @@ services:
     environment:
       - TELEGRAM_BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
       - TELEGRAM_ALLOWED_CHAT_ID=YOUR_CHAT_ID
-      - ARIA2_RPC_URL=http://aria2:6800/jsonrpc
-      - ARIA2_RPC_SECRET=YourSuperSecretToken
+      - ARIA2_RPC_URL=http://aria2:8210/jsonrpc
+      - ARIA2_RPC_SECRET=a1234567890
       - DOWNLOAD_DIR=/downloads/temp
       - DESTINATION_DIR=/downloads/completed
       - UPDATE_INTERVAL=3
