@@ -225,4 +225,21 @@ public actor TelegramBot {
         let params = Params(callbackQueryId: callbackQueryId, text: text)
         return try await makeRequest(method: "answerCallbackQuery", params: params)
     }
+    
+    /// Delete a message
+    @discardableResult
+    public func deleteMessage(chatId: Int64, messageId: Int) async throws -> Bool {
+        struct Params: Encodable {
+            let chatId: Int64
+            let messageId: Int
+            
+            enum CodingKeys: String, CodingKey {
+                case chatId = "chat_id"
+                case messageId = "message_id"
+            }
+        }
+        
+        let params = Params(chatId: chatId, messageId: messageId)
+        return try await makeRequest(method: "deleteMessage", params: params)
+    }
 }
