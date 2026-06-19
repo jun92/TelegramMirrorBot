@@ -225,44 +225,36 @@ public actor MirrorDaemon {
             return
         }
         
-        do {
-            if task.phase == .pending {
-                // Remove from pendingQueue and activeTasks
-                pendingQueue.removeAll { $0 == gid }
-                activeTasks.removeValue(forKey: gid)
-                
-                let cancelledText = "❌ 대기 중 취소되었습니다."
-                _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
-                
-                // Recalculate queue positions
-                await updatePendingTasksQueuePositions()
-                
-                try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "대기열에서 성공적으로 취소되었습니다.")
-                print("Pending task cancelled by user. TempID: \(gid)")
-                return
-            }
-            
-            if task.phase == .downloading {
-                _ = try await aria2.remove(gid)
-            }
-            
-            task.phase = .cancelled
-            activeTasks[gid] = task
-            
-            let cancelledText = "❌ 사용자에 의해 다운로드가 취소되었습니다."
-            _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
-            
-            if task.phase == .downloading {
-                try? await aria2.purgeDownloadResult(gid)
-            }
+        if task.phase == .pending {
+            // Remove from pendingQueue and activeTasks
+            pendingQueue.removeAll { $0 == gid }
             activeTasks.removeValue(forKey: gid)
             
-            try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "성공적으로 취소되었습니다.")
-            print("Task cancelled by user. GID: \(gid)")
-        } catch {
-            print("Failed to cancel GID \(gid): \(error)")
-            try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "취소 실패: \(error.localizedDescription)")
+            let cancelledText = "❌ 대기 중 취소되었습니다."
+            _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
+            
+            // Recalculate queue positions
+            await updatePendingTasksQueuePositions()
+            
+            try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "대기열에서 성공적으로 취소되었습니다.")
+            print("Pending task cancelled by user. TempID: \(gid)")
+            return
         }
+        
+        if task.phase == .downloading {
+            await cleanupDownloadResources(gid: gid)
+        }
+        
+        task.phase = .cancelled
+        activeTasks[gid] = task
+        
+        let cancelledText = "❌ 사용자에 의해 다운로드가 취소되었습니다."
+        _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
+        
+        activeTasks.removeValue(forKey: gid)
+        
+        try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "성공적으로 취소되었습니다.")
+        print("Task cancelled by user. GID: \(gid)")
     }
     
     // MARK: - Monitoring & Moving Loop
@@ -472,7 +464,8 @@ public actor MirrorDaemon {
                 
                 let text = "❌ 다운로드 중 에러가 발생했습니다: (\(errCode)) \(errMsg)"
                 _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: text, replyMarkup: nil)
-                try? await aria2.purgeDownloadResult(task.gid)
+                
+                await cleanupDownloadResources(gid: task.gid, status: status)
                 activeTasks.removeValue(forKey: task.gid)
             }
         } catch {
@@ -484,7 +477,7 @@ public actor MirrorDaemon {
                 let failText = "❌ 다운로드 상태 조회 실패가 지속되어 작업을 강제 중단합니다: \(error.localizedDescription)"
                 _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: failText, replyMarkup: nil)
                 
-                try? await aria2.purgeDownloadResult(task.gid)
+                await cleanupDownloadResources(gid: task.gid)
                 activeTasks.removeValue(forKey: task.gid)
             } else {
                 activeTasks[task.gid] = updated
@@ -678,6 +671,69 @@ public actor MirrorDaemon {
         return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
     }
     
+    /// Cleans up local files (like .aria2 or torrent file) and calls aria2.remove/purge to ensure no ghost files or tasks remain.
+    private func cleanupDownloadResources(gid: String, status: Aria2Status? = nil) async {
+        // 1. Force removal from aria2 if it is still active/waiting
+        let currentStatus: Aria2Status?
+        if let status = status {
+            currentStatus = status
+        } else {
+            currentStatus = try? await aria2.tellStatus(gid)
+        }
+        
+        // Try to remove from aria2 queue (in case it is still active/paused/waiting)
+        if let s = currentStatus {
+            let state = s.status
+            if state == "active" || state == "waiting" || state == "paused" {
+                _ = try? await aria2.remove(gid)
+            }
+        } else {
+            // Fallback: try removing anyway just in case
+            _ = try? await aria2.remove(gid)
+        }
+        
+        // Purge memory result in aria2
+        _ = try? await aria2.purgeDownloadResult(gid)
+        
+        // 2. Clean up disk files (.aria2 and partial downloads)
+        guard let s = currentStatus else { return }
+        let fileManager = FileManager.default
+        
+        for file in s.files {
+            let filePath = file.path
+            guard !filePath.isEmpty else { continue }
+            
+            // Delete the main partial file (if exists)
+            let fileURL = URL(fileURLWithPath: filePath)
+            if fileManager.fileExists(atPath: fileURL.path) {
+                try? fileManager.removeItem(at: fileURL)
+                print("Cleaned up incomplete file: \(fileURL.path)")
+            }
+            
+            // Delete the .aria2 control file
+            let aria2ControlURL = URL(fileURLWithPath: filePath + ".aria2")
+            if fileManager.fileExists(atPath: aria2ControlURL.path) {
+                try? fileManager.removeItem(at: aria2ControlURL)
+                print("Cleaned up aria2 control file: \(aria2ControlURL.path)")
+            }
+        }
+        
+        // 3. Clean up related torrent/meta files in the downloadDir
+        let downloadDirURL = URL(fileURLWithPath: downloadDir).standardized
+        if let contents = try? fileManager.contentsOfDirectory(at: downloadDirURL, includingPropertiesForKeys: nil, options: []) {
+            for itemURL in contents {
+                let name = itemURL.lastPathComponent
+                if name.lowercased().hasSuffix(".torrent") {
+                    // Check if it matches this task (aria2c torrent filenames often start with GID or contain the GID)
+                    if name.contains(gid) {
+                        try? fileManager.removeItem(at: itemURL)
+                        print("Cleaned up residual torrent file: \(itemURL.path)")
+                    }
+                }
+            }
+        }
+    }
+
     /// Safely edits a Telegram message. If edit fails (e.g. message deleted), fallbacks to sending a new message.
     private func safeEditMessage(
         chatId: Int64,
