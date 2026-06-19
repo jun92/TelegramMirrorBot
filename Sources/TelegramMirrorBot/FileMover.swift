@@ -33,6 +33,61 @@ public actor FileMover {
     ///   - source: Source file or directory URL.
     ///   - destination: Target file or directory URL.
     ///   - progressHandler: Callback for reporting progress: (progressFraction: Double, copiedBytes: Int64, totalBytes: Int64).
+    /// Resolves the actual file URL on the file system by checking NFC, NFD, and fuzzy name matching in parent directory.
+    private func resolveActualURL(for url: URL) -> URL? {
+        let fileManager = FileManager.default
+        let path = url.path
+        
+        // 1. Direct check
+        if fileManager.fileExists(atPath: path) {
+            return url
+        }
+        
+        // 2. NFC check (precomposed)
+        let nfcPath = path.precomposedStringWithCanonicalMapping
+        if fileManager.fileExists(atPath: nfcPath) {
+            return URL(fileURLWithPath: nfcPath)
+        }
+        
+        // 3. NFD check (decomposed)
+        let nfdPath = path.decomposedStringWithCanonicalMapping
+        if fileManager.fileExists(atPath: nfdPath) {
+            return URL(fileURLWithPath: nfdPath)
+        }
+        
+        // 4. Fuzzy match in parent directory
+        let parentDir = url.deletingLastPathComponent()
+        let targetName = url.lastPathComponent
+        
+        // Check if parent directory exists
+        guard fileManager.fileExists(atPath: parentDir.path) else {
+            return nil
+        }
+        
+        do {
+            let contents = try fileManager.contentsOfDirectory(at: parentDir, includingPropertiesForKeys: nil, options: [])
+            for itemURL in contents {
+                let itemName = itemURL.lastPathComponent
+                
+                // Compare using canonical matching
+                if itemName.precomposedStringWithCanonicalMapping == targetName.precomposedStringWithCanonicalMapping ||
+                   itemName.decomposedStringWithCanonicalMapping == targetName.decomposedStringWithCanonicalMapping ||
+                   itemName.localizedStandardCompare(targetName) == .orderedSame {
+                    return itemURL
+                }
+            }
+        } catch {
+            print("Warning: Failed to list parent directory \(parentDir.path): \(error)")
+        }
+        
+        return nil
+    }
+    
+    /// Moves a file or directory from source to destination by copying block-by-block (to report progress) and then deleting the source.
+    /// - Parameters:
+    ///   - source: Source file or directory URL.
+    ///   - destination: Target file or directory URL.
+    ///   - progressHandler: Callback for reporting progress: (progressFraction: Double, copiedBytes: Int64, totalBytes: Int64).
     public func move(
         from source: URL,
         to destination: URL,
@@ -40,18 +95,25 @@ public actor FileMover {
     ) async throws {
         let fileManager = FileManager.default
         
-        guard fileManager.fileExists(atPath: source.path) else {
-            throw NSError(domain: "FileMover", code: 1, userInfo: [NSLocalizedDescriptionKey: "Source path does not exist"])
+        // Resolve actual path handling NFC/NFD discrepancies
+        let resolvedSource = resolveActualURL(for: source) ?? source
+        
+        // Normalize target destination path to NFC (precomposed) for standardized path storage
+        let normalizedDestPath = destination.path.precomposedStringWithCanonicalMapping
+        let resolvedDestination = URL(fileURLWithPath: normalizedDestPath)
+        
+        guard fileManager.fileExists(atPath: resolvedSource.path) else {
+            throw NSError(domain: "FileMover", code: 1, userInfo: [NSLocalizedDescriptionKey: "Source path does not exist: \(resolvedSource.path)"])
         }
         
-        let totalSize = try calculateSize(at: source)
+        let totalSize = try calculateSize(at: resolvedSource)
         guard totalSize > 0 else {
             // Empty folder or 0-byte file: move instantly using FileManager
-            if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
+            if fileManager.fileExists(atPath: resolvedDestination.path) {
+                try fileManager.removeItem(at: resolvedDestination)
             }
-            try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try fileManager.moveItem(at: source, to: destination)
+            try fileManager.createDirectory(at: resolvedDestination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fileManager.moveItem(at: resolvedSource, to: resolvedDestination)
             progressHandler(1.0, 0, 0)
             return
         }
@@ -59,7 +121,7 @@ public actor FileMover {
         var bytesCopied: Int64 = 0
         
         // Target directory preparation
-        try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: resolvedDestination.deletingLastPathComponent(), withIntermediateDirectories: true)
         
         // Helper to copy a single file in chunks and report progress
         func copyFile(from src: URL, to dest: URL) throws {
@@ -124,15 +186,15 @@ public actor FileMover {
             }
         }
         
-        let resourceValues = try source.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
+        let resourceValues = try resolvedSource.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
         
         if resourceValues.isRegularFile == true {
-            try copyFile(from: source, to: destination)
+            try copyFile(from: resolvedSource, to: resolvedDestination)
         } else if resourceValues.isDirectory == true {
             // Create destination root directory
-            try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: resolvedDestination, withIntermediateDirectories: true)
             
-            guard let enumerator = fileManager.enumerator(at: source, includingPropertiesForKeys: [.isRegularFileKey], options: []) else {
+            guard let enumerator = fileManager.enumerator(at: resolvedSource, includingPropertiesForKeys: [.isRegularFileKey], options: []) else {
                 throw NSError(domain: "FileMover", code: 6, userInfo: [NSLocalizedDescriptionKey: "Failed to create directory enumerator"])
             }
             
@@ -140,8 +202,8 @@ public actor FileMover {
                 let rValues = try srcFileURL.resourceValues(forKeys: [.isRegularFileKey] as Set<URLResourceKey>)
                 if rValues.isRegularFile == true {
                     // Compute destination file path
-                    let relativePath = String(srcFileURL.path.dropFirst(source.path.count))
-                    let destFileURL = destination.appendingPathComponent(relativePath)
+                    let relativePath = String(srcFileURL.path.dropFirst(resolvedSource.path.count))
+                    let destFileURL = resolvedDestination.appendingPathComponent(relativePath)
                     try copyFile(from: srcFileURL, to: destFileURL)
                 }
             }
@@ -151,6 +213,6 @@ public actor FileMover {
         progressHandler(1.0, totalSize, totalSize)
         
         // Remove source after successful copy
-        try fileManager.removeItem(at: source)
+        try fileManager.removeItem(at: resolvedSource)
     }
 }

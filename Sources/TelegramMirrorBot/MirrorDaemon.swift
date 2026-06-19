@@ -119,8 +119,6 @@ public actor MirrorDaemon {
             let isMagnet = trimmed.lowercased().hasPrefix("magnet:?")
             let isHttp = trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://")
             if isMagnet || isHttp {
-                // Delete user's original link message to clean up the chat
-                try? await bot.deleteMessage(chatId: chatId, messageId: message.messageId)
                 await handleNewDownloadRequest(uri: trimmed, chatId: chatId)
             } else {
                 try? await bot.sendMessage(chatId: chatId, text: "❌ 올바른 마그넷 링크 또는 파일 다운로드 링크를 입력해 주세요.")
@@ -430,8 +428,8 @@ public actor MirrorDaemon {
                 if let followedBy = status.followedBy, !followedBy.isEmpty, let newGid = followedBy.first {
                     print("Metadata download complete for GID: \(task.gid). Switching to actual download GID: \(newGid)")
                     
-                    // Create a new task mapping the new GID since MirrorTask.gid is immutable (let)
-                    var newTask = MirrorTask(
+                    // Create a new task mapping the new GID
+                    let newTask = MirrorTask(
                         gid: newGid,
                         uri: task.uri,
                         chatId: task.chatId,
@@ -440,22 +438,31 @@ public actor MirrorDaemon {
                         lastStatusText: "📥 **메타데이터 파싱 완료, 실제 다운로드 시작 중...**"
                     )
                     
-                    // Clean up metadata result in aria2
+                    // CRITICAL: Replace mapping synchronously BEFORE any await calls to prevent duplicate re-entrant monitoring
+                    activeTasks.removeValue(forKey: task.gid)
+                    activeTasks[newGid] = newTask
+                    
+                    // Clean up metadata result in aria2 (async)
                     try? await aria2.purgeDownloadResult(task.gid)
                     
                     let markup = InlineKeyboardMarkup(inlineKeyboard: [
                         [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(newGid)")]
                     ])
                     let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: newTask.lastStatusText, replyMarkup: markup)
-                    newTask.messageId = newMsgId
-                    newTask.errorCount = 0
                     
-                    // Replace the active task GID mapping
-                    activeTasks.removeValue(forKey: task.gid)
-                    activeTasks[newGid] = newTask
+                    // Persist final messageId if changed by safeEditMessage
+                    if var currentTask = activeTasks[newGid] {
+                        currentTask.messageId = newMsgId
+                        activeTasks[newGid] = currentTask
+                    }
                 } else {
+                    // CRITICAL: Update phase synchronously BEFORE calling the async handleDownloadComplete
+                    var movingTask = task
+                    movingTask.phase = .moving
+                    activeTasks[task.gid] = movingTask
+                    
                     // Hand-off to file moving phase (actual file download complete)
-                    await handleDownloadComplete(task: task, status: status)
+                    await handleDownloadComplete(task: movingTask, status: status)
                 }
                 
             } else if state == "error" {
@@ -513,9 +520,12 @@ public actor MirrorDaemon {
         let downloadDirURL = URL(fileURLWithPath: downloadDir).standardized
         let sourceStandardized = sourceURL.standardized
         
-        if sourceStandardized.path.hasPrefix(downloadDirURL.path) {
+        let normalizedSourcePath = sourceStandardized.path.precomposedStringWithCanonicalMapping
+        let normalizedDownloadDirPath = downloadDirURL.path.precomposedStringWithCanonicalMapping
+        
+        if normalizedSourcePath.hasPrefix(normalizedDownloadDirPath) {
             // Find the immediate child of downloadDirURL that contains the files
-            let relativePath = String(sourceStandardized.path.dropFirst(downloadDirURL.path.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let relativePath = String(normalizedSourcePath.dropFirst(normalizedDownloadDirPath.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             let components = relativePath.split(separator: "/")
             if let firstComponent = components.first {
                 resolvedSourceURL = downloadDirURL.appendingPathComponent(String(firstComponent))
