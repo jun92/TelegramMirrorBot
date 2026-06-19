@@ -13,9 +13,10 @@ public struct MirrorTask: Sendable {
     public let gid: String // Temporary UUID for pending, actual GID for downloading
     public let uri: String // Original magnet / link
     public let chatId: Int64
-    public let messageId: Int
+    public var messageId: Int // Changed to var to allow updating if fallback message is sent
     public var phase: Phase
     public var lastStatusText: String
+    public var errorCount: Int = 0 // Track sequential failures
 }
 
 public actor MirrorDaemon {
@@ -233,7 +234,7 @@ public actor MirrorDaemon {
                 activeTasks.removeValue(forKey: gid)
                 
                 let cancelledText = "❌ 대기 중 취소되었습니다."
-                try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
+                _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
                 
                 // Recalculate queue positions
                 await updatePendingTasksQueuePositions()
@@ -251,7 +252,7 @@ public actor MirrorDaemon {
             activeTasks[gid] = task
             
             let cancelledText = "❌ 사용자에 의해 다운로드가 취소되었습니다."
-            try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
+            _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
             
             if task.phase == .downloading {
                 try? await aria2.purgeDownloadResult(gid)
@@ -299,7 +300,7 @@ public actor MirrorDaemon {
             
             do {
                 let startingText = "⏳ **다운로드 시작 중...**"
-                try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: startingText, replyMarkup: nil)
+                let newMsgId1 = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: startingText, replyMarkup: nil)
                 
                 let gid = try await aria2.addUri(task.uri, downloadDir: downloadDir)
                 
@@ -314,13 +315,13 @@ public actor MirrorDaemon {
                 let markup = InlineKeyboardMarkup(inlineKeyboard: [
                     [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(gid)")]
                 ])
-                try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: loadingText, replyMarkup: markup)
+                let newMsgId2 = await safeEditMessage(chatId: task.chatId, messageId: newMsgId1, text: loadingText, replyMarkup: markup)
                 
                 let newTask = MirrorTask(
                     gid: gid,
                     uri: task.uri,
                     chatId: task.chatId,
-                    messageId: task.messageId,
+                    messageId: newMsgId2,
                     phase: .downloading,
                     lastStatusText: loadingText
                 )
@@ -332,7 +333,7 @@ public actor MirrorDaemon {
             } catch {
                 print("Failed to promote task \(tempId): \(error)")
                 let failText = "❌ 대기열에서 다운로드 시작 실패: \(error.localizedDescription)"
-                try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: failText, replyMarkup: nil)
+                _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: failText, replyMarkup: nil)
                 activeTasks.removeValue(forKey: tempId)
             }
         }
@@ -367,13 +368,14 @@ public actor MirrorDaemon {
             📋 **대기 순서:** \(queuePos)번째 대기 중
             """
             
-            task.lastStatusText = pendingText
-            activeTasks[tempId] = task
-            
             let markup = InlineKeyboardMarkup(inlineKeyboard: [
                 [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(tempId)")]
             ])
-            try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: pendingText, replyMarkup: markup)
+            let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: pendingText, replyMarkup: markup)
+            
+            task.messageId = newMsgId
+            task.lastStatusText = pendingText
+            activeTasks[tempId] = task
         }
     }
     
@@ -407,14 +409,20 @@ public actor MirrorDaemon {
                 
                 // Only edit if content changed to avoid spamming API
                 if text != task.lastStatusText {
-                    var updated = task
-                    updated.lastStatusText = text
-                    activeTasks[task.gid] = updated
-                    
                     let markup = InlineKeyboardMarkup(inlineKeyboard: [
                         [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(task.gid)")]
                     ])
-                    try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: text, replyMarkup: markup)
+                    let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: text, replyMarkup: markup)
+                    
+                    var updated = task
+                    updated.lastStatusText = text
+                    updated.messageId = newMsgId
+                    updated.errorCount = 0 // Reset error count on successful communication
+                    activeTasks[task.gid] = updated
+                } else if task.errorCount > 0 {
+                    var updated = task
+                    updated.errorCount = 0
+                    activeTasks[task.gid] = updated
                 }
                 
             } else if state == "complete" {
@@ -423,7 +431,7 @@ public actor MirrorDaemon {
                     print("Metadata download complete for GID: \(task.gid). Switching to actual download GID: \(newGid)")
                     
                     // Create a new task mapping the new GID since MirrorTask.gid is immutable (let)
-                    let newTask = MirrorTask(
+                    var newTask = MirrorTask(
                         gid: newGid,
                         uri: task.uri,
                         chatId: task.chatId,
@@ -432,17 +440,19 @@ public actor MirrorDaemon {
                         lastStatusText: "📥 **메타데이터 파싱 완료, 실제 다운로드 시작 중...**"
                     )
                     
-                    // Replace the active task GID mapping
-                    activeTasks.removeValue(forKey: task.gid)
-                    activeTasks[newGid] = newTask
-                    
                     // Clean up metadata result in aria2
                     try? await aria2.purgeDownloadResult(task.gid)
                     
                     let markup = InlineKeyboardMarkup(inlineKeyboard: [
                         [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(newGid)")]
                     ])
-                    try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: newTask.lastStatusText, replyMarkup: markup)
+                    let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: newTask.lastStatusText, replyMarkup: markup)
+                    newTask.messageId = newMsgId
+                    newTask.errorCount = 0
+                    
+                    // Replace the active task GID mapping
+                    activeTasks.removeValue(forKey: task.gid)
+                    activeTasks[newGid] = newTask
                 } else {
                     // Hand-off to file moving phase (actual file download complete)
                     await handleDownloadComplete(task: task, status: status)
@@ -454,12 +464,24 @@ public actor MirrorDaemon {
                 print("Aria2 download error for GID \(task.gid): (code \(errCode)) \(errMsg)")
                 
                 let text = "❌ 다운로드 중 에러가 발생했습니다: (\(errCode)) \(errMsg)"
-                try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: text, replyMarkup: nil)
+                _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: text, replyMarkup: nil)
                 try? await aria2.purgeDownloadResult(task.gid)
                 activeTasks.removeValue(forKey: task.gid)
             }
         } catch {
             print("Error updating status for GID \(task.gid): \(error)")
+            var updated = task
+            updated.errorCount += 1
+            if updated.errorCount >= 5 {
+                print("Task \(task.gid) failed consecutively 5 times. Pruning task to free slots.")
+                let failText = "❌ 다운로드 상태 조회 실패가 지속되어 작업을 강제 중단합니다: \(error.localizedDescription)"
+                _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: failText, replyMarkup: nil)
+                
+                try? await aria2.purgeDownloadResult(task.gid)
+                activeTasks.removeValue(forKey: task.gid)
+            } else {
+                activeTasks[task.gid] = updated
+            }
         }
     }
     
@@ -473,7 +495,7 @@ public actor MirrorDaemon {
         // We find the common prefix or the parent directory of the first file.
         guard let firstFile = status.files.first, !firstFile.path.isEmpty else {
             let failText = "❌ 다운로드 완료 후 로컬 파일을 찾을 수 없습니다."
-            try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: failText, replyMarkup: nil)
+            _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: failText, replyMarkup: nil)
             try? await aria2.purgeDownloadResult(task.gid)
             activeTasks.removeValue(forKey: task.gid)
             return
@@ -517,18 +539,20 @@ public actor MirrorDaemon {
         📂 **파일명:** \(fileName)
         진행률: [░░░░░░░░░░] 0.0%
         """
-        try? await bot.editMessageText(chatId: task.chatId, messageId: task.messageId, text: movingStartText, replyMarkup: nil)
+        
+        let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: movingStartText, replyMarkup: nil)
+        updated.messageId = newMsgId
+        activeTasks[task.gid] = updated
         
         // We need to keep a reference to self or variables for task safety.
         let targetChatId = task.chatId
-        let targetMsgId = task.messageId
         let targetGid = task.gid
         
         // Start copying process
         do {
             try await mover.move(from: resolvedSourceURL, to: targetURL) { progress, copiedBytes, totalBytes in
                 // Because progress updates can be frequent, we perform updates here.
-                // Note: progress callback is executed inside the FileMover's context but throttled to 500ms.
+                // Note: progress callback is executed inside the FileMover's context but throttled to 3.0s.
                 let progressBar = self.makeProgressBar(progress: progress)
                 let percent = String(format: "%.1f", progress * 100.0)
                 let sizeStr = "\(self.formatSize(copiedBytes)) / \(self.formatSize(totalBytes))"
@@ -541,9 +565,13 @@ public actor MirrorDaemon {
                 💾 **크기:** \(sizeStr)
                 """
                 
-                // Using Task to call Telegram Bot asynchronously from closure
+                // Using Task to call Telegram Bot safely from closure
                 Task {
-                    try? await self.bot.editMessageText(chatId: targetChatId, messageId: targetMsgId, text: progressText, replyMarkup: nil)
+                    // Fetch latest message ID dynamically from the actor state to avoid using stale captured values
+                    if let currentMessageId = await self.getLatestMessageId(for: targetGid) {
+                        let updatedMsgId = await self.safeEditMessage(chatId: targetChatId, messageId: currentMessageId, text: progressText, replyMarkup: nil)
+                        await self.updateTaskMessageId(gid: targetGid, messageId: updatedMsgId)
+                    }
                 }
             }
             
@@ -556,7 +584,8 @@ public actor MirrorDaemon {
             📍 **저장 경로:** \(targetURL.path)
             """
             
-            try? await bot.editMessageText(chatId: targetChatId, messageId: targetMsgId, text: successText, replyMarkup: nil)
+            let finalMsgId = activeTasks[targetGid]?.messageId ?? updated.messageId
+            _ = await safeEditMessage(chatId: targetChatId, messageId: finalMsgId, text: successText, replyMarkup: nil)
             try? await aria2.purgeDownloadResult(targetGid)
             activeTasks.removeValue(forKey: targetGid)
             print("Task completed successfully. GID: \(targetGid)")
@@ -564,7 +593,8 @@ public actor MirrorDaemon {
         } catch {
             print("Error moving file: \(error)")
             let failText = "❌ 파일 이동 중 에러가 발생했습니다: \(error.localizedDescription)"
-            try? await bot.editMessageText(chatId: targetChatId, messageId: targetMsgId, text: failText, replyMarkup: nil)
+            let finalMsgId = activeTasks[targetGid]?.messageId ?? updated.messageId
+            _ = await safeEditMessage(chatId: targetChatId, messageId: finalMsgId, text: failText, replyMarkup: nil)
             try? await aria2.purgeDownloadResult(targetGid)
             activeTasks.removeValue(forKey: targetGid)
         }
@@ -638,6 +668,48 @@ public actor MirrorDaemon {
         let hours = totalSeconds / 3600
         
         return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
+    }
+    
+    /// Safely edits a Telegram message. If edit fails (e.g. message deleted), fallbacks to sending a new message.
+    private func safeEditMessage(
+        chatId: Int64,
+        messageId: Int,
+        text: String,
+        replyMarkup: InlineKeyboardMarkup? = nil
+    ) async -> Int {
+        do {
+            let msg = try await bot.editMessageText(
+                chatId: chatId,
+                messageId: messageId,
+                text: text,
+                replyMarkup: replyMarkup
+            )
+            return msg.messageId
+        } catch {
+            print("Warning: Failed to edit Telegram message \(messageId), sending fallback new message: \(error)")
+            do {
+                let msg = try await bot.sendMessage(
+                    chatId: chatId,
+                    text: text,
+                    replyMarkup: replyMarkup
+                )
+                return msg.messageId
+            } catch {
+                print("Critical Error: Failed to send fallback message: \(error)")
+                return messageId // Return original if both fail
+            }
+        }
+    }
+    
+    private func updateTaskMessageId(gid: String, messageId: Int) {
+        if var task = activeTasks[gid] {
+            task.messageId = messageId
+            activeTasks[gid] = task
+        }
+    }
+    
+    private func getLatestMessageId(for gid: String) -> Int? {
+        return activeTasks[gid]?.messageId
     }
 }
 
