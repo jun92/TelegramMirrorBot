@@ -453,8 +453,10 @@ public actor MirrorDaemon {
                     movingTask.phase = .moving
                     activeTasks[task.gid] = movingTask
                     
-                    // Hand-off to file moving phase (actual file download complete)
-                    await handleDownloadComplete(task: movingTask, status: status)
+                    // Hand-off to file moving phase in a non-blocking background task
+                    Task {
+                        await self.handleDownloadComplete(task: movingTask, status: status)
+                    }
                 }
                 
             } else if state == "error" {
