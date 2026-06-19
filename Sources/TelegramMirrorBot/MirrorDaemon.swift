@@ -561,8 +561,9 @@ public actor MirrorDaemon {
         // Start copying process
         do {
             try await mover.move(from: resolvedSourceURL, to: targetURL) { progress, copiedBytes, totalBytes in
-                // Because progress updates can be frequent, we perform updates here.
-                // Note: progress callback is executed inside the FileMover's context but throttled to 3.0s.
+                // Skip progress updates for final 100% to avoid race condition with the success message
+                guard progress < 0.999 else { return }
+                
                 let progressBar = self.makeProgressBar(progress: progress)
                 let percent = String(format: "%.1f", progress * 100.0)
                 let sizeStr = "\(self.formatSize(copiedBytes)) / \(self.formatSize(totalBytes))"
@@ -575,13 +576,10 @@ public actor MirrorDaemon {
                 💾 **크기:** \(sizeStr)
                 """
                 
-                // Using Task to call Telegram Bot safely from closure
-                Task {
-                    // Fetch latest message ID dynamically from the actor state to avoid using stale captured values
-                    if let currentMessageId = await self.getLatestMessageId(for: targetGid) {
-                        let updatedMsgId = await self.safeEditMessage(chatId: targetChatId, messageId: currentMessageId, text: progressText, replyMarkup: nil)
-                        await self.updateTaskMessageId(gid: targetGid, messageId: updatedMsgId)
-                    }
+                // Fetch latest message ID dynamically from the actor state to avoid using stale captured values
+                if let currentMessageId = await self.getLatestMessageId(for: targetGid) {
+                    let updatedMsgId = await self.safeEditMessage(chatId: targetChatId, messageId: currentMessageId, text: progressText, replyMarkup: nil)
+                    await self.updateTaskMessageId(gid: targetGid, messageId: updatedMsgId)
                 }
             }
             

@@ -3,6 +3,47 @@ import Foundation
 public actor FileMover {
     public init() {}
     
+    private final class ProgressTracker: @unchecked Sendable {
+        private let totalSize: Int64
+        private let lock = NSLock()
+        private var bytesCopied: Int64 = 0
+        private let progressHandler: @Sendable (Double, Int64, Int64) async -> Void
+        private var lastReportTime = Date()
+        
+        init(totalSize: Int64, progressHandler: @escaping @Sendable (Double, Int64, Int64) async -> Void) {
+            self.totalSize = totalSize
+            self.progressHandler = progressHandler
+        }
+        
+        func incrementAndReport(by bytes: Int) async {
+            let (fraction, currentBytes, total, shouldReport): (Double, Int64, Int64, Bool) = lock.withLock {
+                self.bytesCopied += Int64(bytes)
+                let now = Date()
+                let elapsed = now.timeIntervalSince(self.lastReportTime)
+                let isEOF = self.bytesCopied == self.totalSize
+                let shouldReport = elapsed >= 3.0 || isEOF
+                if shouldReport {
+                    self.lastReportTime = now
+                }
+                let fraction = Double(self.bytesCopied) / Double(self.totalSize)
+                return (fraction, self.bytesCopied, self.totalSize, shouldReport)
+            }
+            
+            if shouldReport {
+                await progressHandler(fraction, currentBytes, total)
+            }
+        }
+        
+        func reportFinal() async {
+            let total = lock.withLock { self.totalSize }
+            await progressHandler(1.0, total, total)
+        }
+        
+        func reportEmpty() async {
+            await progressHandler(1.0, 0, 0)
+        }
+    }
+    
     /// Recursively calculates the size of a file or directory.
     public func calculateSize(at url: URL) throws -> Int64 {
         let resourceValues = try url.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
@@ -28,11 +69,6 @@ public actor FileMover {
         return 0
     }
     
-    /// Moves a file or directory from source to destination by copying block-by-block (to report progress) and then deleting the source.
-    /// - Parameters:
-    ///   - source: Source file or directory URL.
-    ///   - destination: Target file or directory URL.
-    ///   - progressHandler: Callback for reporting progress: (progressFraction: Double, copiedBytes: Int64, totalBytes: Int64).
     /// Resolves the actual file URL on the file system by checking NFC, NFD, and fuzzy name matching in parent directory.
     private func resolveActualURL(for url: URL) -> URL? {
         let fileManager = FileManager.default
@@ -83,6 +119,61 @@ public actor FileMover {
         return nil
     }
     
+    private func copyFile(from src: URL, to dest: URL, tracker: ProgressTracker) async throws {
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: dest.path) {
+            try fileManager.removeItem(at: dest)
+        }
+        try fileManager.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        
+        guard let inputStream = InputStream(url: src) else {
+            throw NSError(domain: "FileMover", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to open input stream for \(src.path)"])
+        }
+        guard let outputStream = OutputStream(url: dest, append: false) else {
+            throw NSError(domain: "FileMover", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to open output stream for \(dest.path)"])
+        }
+        
+        inputStream.open()
+        outputStream.open()
+        
+        defer {
+            inputStream.close()
+            outputStream.close()
+        }
+        
+        let bufferSize = 4 * 1024 * 1024 // 4MB Buffer
+        var buffer = [UInt8](repeating: 0, count: bufferSize)
+        
+        while inputStream.hasBytesAvailable {
+            try Task.checkCancellation()
+            
+            let bytesRead = inputStream.read(&buffer, maxLength: bufferSize)
+            if bytesRead < 0 {
+                if let error = inputStream.streamError {
+                    throw error
+                }
+                throw NSError(domain: "FileMover", code: 4, userInfo: [NSLocalizedDescriptionKey: "Stream read error"])
+            }
+            if bytesRead == 0 {
+                break // EOF
+            }
+            
+            var bytesWritten = 0
+            while bytesWritten < bytesRead {
+                let written = outputStream.write(Array(buffer[bytesWritten..<bytesRead]), maxLength: bytesRead - bytesWritten)
+                if written < 0 {
+                    if let error = outputStream.streamError {
+                        throw error
+                    }
+                    throw NSError(domain: "FileMover", code: 5, userInfo: [NSLocalizedDescriptionKey: "Stream write error"])
+                }
+                bytesWritten += written
+            }
+            
+            await tracker.incrementAndReport(by: bytesRead)
+        }
+    }
+    
     /// Moves a file or directory from source to destination by copying block-by-block (to report progress) and then deleting the source.
     /// - Parameters:
     ///   - source: Source file or directory URL.
@@ -91,7 +182,7 @@ public actor FileMover {
     public func move(
         from source: URL,
         to destination: URL,
-        progressHandler: @escaping @Sendable (Double, Int64, Int64) -> Void
+        progressHandler: @escaping @Sendable (Double, Int64, Int64) async -> Void
     ) async throws {
         let fileManager = FileManager.default
         
@@ -107,6 +198,8 @@ public actor FileMover {
         }
         
         let totalSize = try calculateSize(at: resolvedSource)
+        let tracker = ProgressTracker(totalSize: totalSize, progressHandler: progressHandler)
+        
         guard totalSize > 0 else {
             // Empty folder or 0-byte file: move instantly using FileManager
             if fileManager.fileExists(atPath: resolvedDestination.path) {
@@ -114,82 +207,17 @@ public actor FileMover {
             }
             try fileManager.createDirectory(at: resolvedDestination.deletingLastPathComponent(), withIntermediateDirectories: true)
             try fileManager.moveItem(at: resolvedSource, to: resolvedDestination)
-            progressHandler(1.0, 0, 0)
+            await tracker.reportEmpty()
             return
         }
-        
-        var bytesCopied: Int64 = 0
         
         // Target directory preparation
         try fileManager.createDirectory(at: resolvedDestination.deletingLastPathComponent(), withIntermediateDirectories: true)
         
-        // Helper to copy a single file in chunks and report progress
-        func copyFile(from src: URL, to dest: URL) throws {
-            if fileManager.fileExists(atPath: dest.path) {
-                try fileManager.removeItem(at: dest)
-            }
-            try fileManager.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-            
-            guard let inputStream = InputStream(url: src) else {
-                throw NSError(domain: "FileMover", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to open input stream for \(src.path)"])
-            }
-            guard let outputStream = OutputStream(url: dest, append: false) else {
-                throw NSError(domain: "FileMover", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to open output stream for \(dest.path)"])
-            }
-            
-            inputStream.open()
-            outputStream.open()
-            
-            defer {
-                inputStream.close()
-                outputStream.close()
-            }
-            
-            let bufferSize = 4 * 1024 * 1024 // 4MB Buffer
-            var buffer = [UInt8](repeating: 0, count: bufferSize)
-            
-            var lastReportTime = Date()
-            
-            while inputStream.hasBytesAvailable {
-                let bytesRead = inputStream.read(&buffer, maxLength: bufferSize)
-                if bytesRead < 0 {
-                    if let error = inputStream.streamError {
-                        throw error
-                    }
-                    throw NSError(domain: "FileMover", code: 4, userInfo: [NSLocalizedDescriptionKey: "Stream read error"])
-                }
-                if bytesRead == 0 {
-                    break // EOF
-                }
-                
-                var bytesWritten = 0
-                while bytesWritten < bytesRead {
-                    let written = outputStream.write(Array(buffer[bytesWritten..<bytesRead]), maxLength: bytesRead - bytesWritten)
-                    if written < 0 {
-                        if let error = outputStream.streamError {
-                            throw error
-                        }
-                        throw NSError(domain: "FileMover", code: 5, userInfo: [NSLocalizedDescriptionKey: "Stream write error"])
-                    }
-                    bytesWritten += written
-                }
-                
-                bytesCopied += Int64(bytesRead)
-                
-                // Throttle progress updates (max once per 3000ms)
-                let now = Date()
-                if now.timeIntervalSince(lastReportTime) >= 3.0 || bytesCopied == totalSize {
-                    let fraction = Double(bytesCopied) / Double(totalSize)
-                    progressHandler(fraction, bytesCopied, totalSize)
-                    lastReportTime = now
-                }
-            }
-        }
-        
         let resourceValues = try resolvedSource.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
         
         if resourceValues.isRegularFile == true {
-            try copyFile(from: resolvedSource, to: resolvedDestination)
+            try await copyFile(from: resolvedSource, to: resolvedDestination, tracker: tracker)
         } else if resourceValues.isDirectory == true {
             // Create destination root directory
             try fileManager.createDirectory(at: resolvedDestination, withIntermediateDirectories: true)
@@ -204,13 +232,13 @@ public actor FileMover {
                     // Compute destination file path
                     let relativePath = String(srcFileURL.path.dropFirst(resolvedSource.path.count))
                     let destFileURL = resolvedDestination.appendingPathComponent(relativePath)
-                    try copyFile(from: srcFileURL, to: destFileURL)
+                    try await copyFile(from: srcFileURL, to: destFileURL, tracker: tracker)
                 }
             }
         }
         
         // Report final progress
-        progressHandler(1.0, totalSize, totalSize)
+        await tracker.reportFinal()
         
         // Remove source after successful copy
         try fileManager.removeItem(at: resolvedSource)
