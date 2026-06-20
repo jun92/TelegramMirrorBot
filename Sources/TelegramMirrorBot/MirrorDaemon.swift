@@ -126,9 +126,15 @@ public actor MirrorDaemon {
                 
                 💡 <b>사용 가능한 명령어:</b>
                 /start - 봇 시작 및 도움말 표시
+                /info - 현재 다운로드 진행 상태, 대기열 및 디스크 공간 정보 조회
                 /init, /reset, /clear - 서버 초기화 (진행 중인 다운로드 및 임시 파일 전체 삭제)
                 """
                 try? await bot.sendMessage(chatId: chatId, text: welcome)
+                return
+            }
+            
+            if trimmed.hasPrefix("/info") {
+                await handleInfoCommand(chatId: chatId)
                 return
             }
             
@@ -805,6 +811,102 @@ public actor MirrorDaemon {
             print("Failed to execute reset command: \(error)")
             try? await bot.sendMessage(chatId: chatId, text: "❌ 초기화 중 오류가 발생했습니다: \(error.localizedDescription)")
         }
+    }
+
+    private func getFreeDiskSpace(at path: String) -> String {
+        let fileManager = FileManager.default
+        do {
+            let attrs = try fileManager.attributesOfFileSystem(forPath: path)
+            if let freeBytes = attrs[.systemFreeSize] as? Int64,
+               let totalBytes = attrs[.systemSize] as? Int64 {
+                return "\(formatSize(freeBytes)) / \(formatSize(totalBytes)) 사용 가능"
+            }
+        } catch {
+            print("Failed to get disk space for \(path): \(error)")
+        }
+        return "조회 실패"
+    }
+
+    private func handleInfoCommand(chatId: Int64) async {
+        print("Info command triggered by user from Chat ID: \(chatId)")
+        
+        // 1. Get active downloading tasks info
+        var activeLines: [String] = []
+        let tasks = activeTasks
+        
+        let downloadingTasks = tasks.values.filter { $0.phase == .downloading }
+        if downloadingTasks.isEmpty {
+            activeLines.append("진행 중인 다운로드가 없습니다.")
+        } else {
+            for task in downloadingTasks {
+                if let status = try? await aria2.tellStatus(task.gid) {
+                    let name = getFileName(from: status)
+                    let progress = status.progress
+                    let speed = status.speed
+                    let total = status.totalSize
+                    let completed = status.completedSize
+                    
+                    let bar = makeProgressBar(progress: progress, length: 8)
+                    let pct = String(format: "%.1f", progress * 100.0)
+                    activeLines.append("• <b>\(name.htmlEscaped)</b>\n  [\(bar)] \(pct)% (\(formatSize(completed))/\(formatSize(total))) | ⚡️ \(formatSpeed(speed))")
+                } else {
+                    activeLines.append("• GID: \(task.gid) (상태 조회 대기 중)")
+                }
+            }
+        }
+        
+        // 2. Get waiting tasks in queue
+        var waitingLines: [String] = []
+        if pendingQueue.isEmpty {
+            waitingLines.append("대기 중인 작업이 없습니다.")
+        } else {
+            for (index, tempId) in pendingQueue.enumerated() {
+                guard let task = tasks[tempId] else { continue }
+                let queuePos = index + 1
+                let nameLabel: String
+                if task.uri.lowercased().hasPrefix("magnet:?") {
+                    if let range = task.uri.range(of: "dn=") {
+                        let sub = task.uri[range.upperBound...]
+                        let rawName = sub.split(separator: "&").first ?? "Magnet Link"
+                        nameLabel = String(rawName).removingPercentEncoding ?? "Magnet Link"
+                    } else {
+                        nameLabel = "Magnet Link"
+                    }
+                } else if let url = URL(string: task.uri) {
+                    nameLabel = url.lastPathComponent
+                } else {
+                    nameLabel = "Unknown File"
+                }
+                
+                // Show first 5 tasks, group the rest
+                if queuePos <= 5 {
+                    waitingLines.append("\(queuePos). <b>\(nameLabel.htmlEscaped)</b>")
+                } else if queuePos == 6 {
+                    waitingLines.append("... 외 \(pendingQueue.count - 5)개 대기 중")
+                    break
+                }
+            }
+        }
+        
+        // 3. Get Disk Space
+        let tempDisk = getFreeDiskSpace(at: downloadDir)
+        let completedDisk = getFreeDiskSpace(at: destinationDir)
+        
+        let infoMessage = """
+        ℹ️ <b>System & Mirror Status</b>
+        
+        📥 <b>진행 중인 다운로드 (\(downloadingTasks.count)/\(maxConcurrentDownloads)):</b>
+        \(activeLines.joined(separator: "\n\n"))
+        
+        ⏳ <b>대기열 (총 \(pendingQueue.count)개):</b>
+        \(waitingLines.joined(separator: "\n"))
+        
+        💾 <b>디스크 남은 공간:</b>
+        • 임시 폴더 (\(downloadDir)): \(tempDisk)
+        • 완료 폴더 (\(destinationDir)): \(completedDisk)
+        """
+        
+        try? await bot.sendMessage(chatId: chatId, text: infoMessage)
     }
 
 
