@@ -371,14 +371,16 @@ public actor MirrorDaemon {
             📋 <b>대기 순서:</b> \(queuePos)번째 대기 중
             """
             
-            let markup = InlineKeyboardMarkup(inlineKeyboard: [
-                [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(tempId)")]
-            ])
-            let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: pendingText, replyMarkup: markup)
-            
-            task.messageId = newMsgId
-            task.lastStatusText = pendingText
-            activeTasks[tempId] = task
+            if pendingText != task.lastStatusText {
+                let markup = InlineKeyboardMarkup(inlineKeyboard: [
+                    [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(tempId)")]
+                ])
+                let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: pendingText, replyMarkup: markup)
+                
+                task.messageId = newMsgId
+                task.lastStatusText = pendingText
+                activeTasks[tempId] = task
+            }
         }
     }
     
@@ -874,6 +876,10 @@ public actor MirrorDaemon {
             )
             return msg.messageId
         } catch {
+            let errStr = "\(error)"
+            if errStr.contains("message is not modified") {
+                return messageId
+            }
             print("Warning: Failed to edit Telegram message \(messageId), sending fallback new message: \(error)")
             do {
                 let msg = try await bot.sendMessage(
