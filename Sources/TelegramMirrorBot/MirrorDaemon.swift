@@ -58,6 +58,9 @@ public actor MirrorDaemon {
         guard !isRunning else { return }
         isRunning = true
         
+        // Clean up any lingering zombie tasks in aria2c session on startup
+        await clearAllAria2Tasks()
+        
         print("Telegram Mirror Bot Daemon started.")
         print("Temp Download Dir: \(downloadDir)")
         print("Destination Dir: \(destinationDir)")
@@ -673,6 +676,59 @@ public actor MirrorDaemon {
         return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
     }
     
+    /// Cleans up all existing tasks in aria2 on startup to prevent ghost/zombie downloads and InfoHash registry errors.
+    private func clearAllAria2Tasks() async {
+        print("Initializing startup cleanup: Clearing all existing aria2 tasks...")
+        
+        var gidsToRemove: Set<String> = []
+        
+        if let active = try? await aria2.tellActive() {
+            for task in active {
+                gidsToRemove.insert(task.gid)
+            }
+        }
+        
+        if let waiting = try? await aria2.tellWaiting(offset: 0, num: 100) {
+            for task in waiting {
+                gidsToRemove.insert(task.gid)
+            }
+        }
+        
+        if let stopped = try? await aria2.tellStopped(offset: 0, num: 100) {
+            for task in stopped {
+                gidsToRemove.insert(task.gid)
+            }
+        }
+        
+        guard !gidsToRemove.isEmpty else {
+            print("No zombie tasks found in aria2 on startup.")
+            return
+        }
+        
+        print("Found \(gidsToRemove.count) zombie tasks in aria2 on startup. Purging...")
+        
+        let fileManager = FileManager.default
+        let downloadDirURL = URL(fileURLWithPath: downloadDir).standardized
+        
+        for gid in gidsToRemove {
+            print("Purging zombie task GID: \(gid)")
+            _ = try? await aria2.remove(gid)
+            _ = try? await aria2.purgeDownloadResult(gid)
+            
+            // Clean up related local files in downloadDir based on GID matching
+            if let contents = try? fileManager.contentsOfDirectory(at: downloadDirURL, includingPropertiesForKeys: nil, options: []) {
+                for itemURL in contents {
+                    let name = itemURL.lastPathComponent
+                    if name.contains(gid) {
+                        try? fileManager.removeItem(at: itemURL)
+                        print("Cleaned up zombie task leftover file: \(itemURL.path)")
+                    }
+                }
+            }
+        }
+        print("Startup cleanup finished.")
+    }
+
     /// Cleans up local files (like .aria2 or torrent file) and calls aria2.remove/purge to ensure no ghost files or tasks remain.
     private func cleanupDownloadResources(gid: String, status: Aria2Status? = nil) async {
         // 1. Force removal from aria2 if it is still active/waiting
@@ -698,39 +754,37 @@ public actor MirrorDaemon {
         _ = try? await aria2.purgeDownloadResult(gid)
         
         // 2. Clean up disk files (.aria2 and partial downloads)
-        guard let s = currentStatus else { return }
         let fileManager = FileManager.default
         
-        for file in s.files {
-            let filePath = file.path
-            guard !filePath.isEmpty else { continue }
-            
-            // Delete the main partial file (if exists)
-            let fileURL = URL(fileURLWithPath: filePath)
-            if fileManager.fileExists(atPath: fileURL.path) {
-                try? fileManager.removeItem(at: fileURL)
-                print("Cleaned up incomplete file: \(fileURL.path)")
-            }
-            
-            // Delete the .aria2 control file
-            let aria2ControlURL = URL(fileURLWithPath: filePath + ".aria2")
-            if fileManager.fileExists(atPath: aria2ControlURL.path) {
-                try? fileManager.removeItem(at: aria2ControlURL)
-                print("Cleaned up aria2 control file: \(aria2ControlURL.path)")
+        if let s = currentStatus {
+            for file in s.files {
+                let filePath = file.path
+                guard !filePath.isEmpty else { continue }
+                
+                // Delete the main partial file (if exists)
+                let fileURL = URL(fileURLWithPath: filePath)
+                if fileManager.fileExists(atPath: fileURL.path) {
+                    try? fileManager.removeItem(at: fileURL)
+                    print("Cleaned up incomplete file: \(fileURL.path)")
+                }
+                
+                // Delete the .aria2 control file
+                let aria2ControlURL = URL(fileURLWithPath: filePath + ".aria2")
+                if fileManager.fileExists(atPath: aria2ControlURL.path) {
+                    try? fileManager.removeItem(at: aria2ControlURL)
+                    print("Cleaned up aria2 control file: \(aria2ControlURL.path)")
+                }
             }
         }
         
-        // 3. Clean up related torrent/meta files in the downloadDir
+        // 3. Clean up related torrent/meta files and any files containing GID in the downloadDir (always attempt)
         let downloadDirURL = URL(fileURLWithPath: downloadDir).standardized
         if let contents = try? fileManager.contentsOfDirectory(at: downloadDirURL, includingPropertiesForKeys: nil, options: []) {
             for itemURL in contents {
                 let name = itemURL.lastPathComponent
-                if name.lowercased().hasSuffix(".torrent") {
-                    // Check if it matches this task (aria2c torrent filenames often start with GID or contain the GID)
-                    if name.contains(gid) {
-                        try? fileManager.removeItem(at: itemURL)
-                        print("Cleaned up residual torrent file: \(itemURL.path)")
-                    }
+                if name.contains(gid) {
+                    try? fileManager.removeItem(at: itemURL)
+                    print("Cleaned up leftover GID file: \(itemURL.path)")
                 }
             }
         }

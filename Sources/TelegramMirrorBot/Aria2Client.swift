@@ -159,6 +159,35 @@ public actor Aria2Client {
         let extra: [AnyEncodable] = [AnyEncodable(gid)]
         return try await sendRequest(method: "aria2.purgeDownloadResult", params: buildParams(extra))
     }
+    
+    /// Returns a list of active downloads.
+    public func tellActive() async throws -> [Aria2Status] {
+        let keys = ["gid", "status", "files"]
+        let extra: [AnyEncodable] = [AnyEncodable(keys)]
+        return try await sendRequest(method: "aria2.tellActive", params: buildParams(extra))
+    }
+    
+    /// Returns a list of waiting or paused downloads.
+    public func tellWaiting(offset: Int, num: Int) async throws -> [Aria2Status] {
+        let keys = ["gid", "status", "files"]
+        let extra: [AnyEncodable] = [
+            AnyEncodable(offset),
+            AnyEncodable(num),
+            AnyEncodable(keys)
+        ]
+        return try await sendRequest(method: "aria2.tellWaiting", params: buildParams(extra))
+    }
+    
+    /// Returns a list of stopped (completed or failed) downloads.
+    public func tellStopped(offset: Int, num: Int) async throws -> [Aria2Status] {
+        let keys = ["gid", "status", "files"]
+        let extra: [AnyEncodable] = [
+            AnyEncodable(offset),
+            AnyEncodable(num),
+            AnyEncodable(keys)
+        ]
+        return try await sendRequest(method: "aria2.tellStopped", params: buildParams(extra))
+    }
 }
 
 // Helper struct to wrap heterogeneous array elements for JSON-RPC parameters.
