@@ -34,7 +34,9 @@ services:
       - ARIA2_RPC_SECRET=a1234567890
       - DOWNLOAD_DIR=/downloads
       - DESTINATION_DIR=/sync
+      # Message update progress polling interval (in seconds)
       - UPDATE_INTERVAL=3
+      # Maximum concurrent download tasks for both the bot and aria2
       - MAX_CONCURRENT_DOWNLOADS=3
     volumes:
       # Mount the same host downloads folder to easily move files locally

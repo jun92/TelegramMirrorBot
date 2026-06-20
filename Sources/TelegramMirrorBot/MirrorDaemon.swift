@@ -61,6 +61,15 @@ public actor MirrorDaemon {
         // Clean up any lingering zombie tasks in aria2c session on startup
         await clearAllAria2Tasks()
         
+        // Sync concurrent download limit to aria2 RPC option dynamically
+        do {
+            let options = ["max-concurrent-downloads": String(maxConcurrentDownloads)]
+            _ = try await aria2.changeGlobalOption(options)
+            print("Successfully synced max-concurrent-downloads (\(maxConcurrentDownloads)) to aria2 daemon.")
+        } catch {
+            print("Warning: Failed to sync max-concurrent-downloads option to aria2: \(error)")
+        }
+        
         print("Telegram Mirror Bot Daemon started.")
         print("Temp Download Dir: \(downloadDir)")
         print("Destination Dir: \(destinationDir)")

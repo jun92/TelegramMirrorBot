@@ -188,6 +188,14 @@ public actor Aria2Client {
         ]
         return try await sendRequest(method: "aria2.tellStopped", params: buildParams(extra))
     }
+    
+    /// Changes global options dynamically.
+    /// - Parameter options: Dictionary of option name to value.
+    /// - Returns: "OK" on success.
+    public func changeGlobalOption(_ options: [String: String]) async throws -> String {
+        let extra: [AnyEncodable] = [AnyEncodable(options)]
+        return try await sendRequest(method: "aria2.changeGlobalOption", params: buildParams(extra))
+    }
 }
 
 // Helper struct to wrap heterogeneous array elements for JSON-RPC parameters.
