@@ -88,6 +88,19 @@ public struct InlineKeyboardButton: Codable, Sendable {
     }
 }
 
+public struct TelegramBotError: Error, CustomStringConvertible, LocalizedError {
+    public let code: Int
+    public let message: String
+    
+    public var description: String {
+        return "TelegramBotError (code \(code)): \(message)"
+    }
+    
+    public var errorDescription: String? {
+        return description
+    }
+}
+
 // MARK: - TelegramBot Class
 
 public actor TelegramBot {
@@ -117,16 +130,16 @@ public actor TelegramBot {
         
         guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
             let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
-            throw NSError(domain: "TelegramBot", code: 1, userInfo: [NSLocalizedDescriptionKey: "HTTP \(method) request failed: \(errorText)"])
+            throw TelegramBotError(code: 1, message: "HTTP \(method) request failed: \(errorText)")
         }
         
         let apiResp = try JSONDecoder().decode(TelegramAPIResponse<R>.self, from: data)
         if !apiResp.ok {
-            throw NSError(domain: "TelegramBot", code: 2, userInfo: [NSLocalizedDescriptionKey: apiResp.description ?? "API Error"])
+            throw TelegramBotError(code: 2, message: apiResp.description ?? "API Error")
         }
         
         guard let result = apiResp.result else {
-            throw NSError(domain: "TelegramBot", code: 3, userInfo: [NSLocalizedDescriptionKey: "API success but no result payload"])
+            throw TelegramBotError(code: 3, message: "API success but no result payload")
         }
         
         return result
@@ -160,7 +173,7 @@ public actor TelegramBot {
     public func sendMessage(
         chatId: Int64,
         text: String,
-        parseMode: String? = "Markdown",
+        parseMode: String? = "HTML",
         replyMarkup: InlineKeyboardMarkup? = nil
     ) async throws -> TelegramMessage {
         struct Params: Encodable {
@@ -187,7 +200,7 @@ public actor TelegramBot {
         chatId: Int64,
         messageId: Int,
         text: String,
-        parseMode: String? = "Markdown",
+        parseMode: String? = "HTML",
         replyMarkup: InlineKeyboardMarkup? = nil
     ) async throws -> TelegramMessage {
         struct Params: Encodable {
