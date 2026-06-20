@@ -106,19 +106,29 @@ public actor MirrorDaemon {
                 return
             }
             
-            if text.hasPrefix("/start") {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if trimmed.hasPrefix("/start") {
                 let welcome = """
                 👋 안녕하세요! <b>Telegram Mirror Bot</b>입니다.
                 
                 다운로드하려는 마그넷 링크나 토렌트 파일 URL을 전송하시면 다운로드가 즉시 시작됩니다.
                 진행 상황이 실시간으로 업데이트되며, 다운로드가 끝나면 지정된 경로로 파일이 자동 이동됩니다.
+                
+                💡 <b>사용 가능한 명령어:</b>
+                /start - 봇 시작 및 도움말 표시
+                /init, /reset, /clear - 서버 초기화 (진행 중인 다운로드 및 임시 파일 전체 삭제)
                 """
                 try? await bot.sendMessage(chatId: chatId, text: welcome)
                 return
             }
             
+            if trimmed.hasPrefix("/init") || trimmed.hasPrefix("/reset") || trimmed.hasPrefix("/clear") {
+                await handleResetCommand(chatId: chatId)
+                return
+            }
+            
             // Validate if it's a magnet link or an HTTP(S) torrent link
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             let isMagnet = trimmed.lowercased().hasPrefix("magnet:?")
             let isHttp = trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://")
             if isMagnet || isHttp {
@@ -700,34 +710,92 @@ public actor MirrorDaemon {
             }
         }
         
-        guard !gidsToRemove.isEmpty else {
-            print("No zombie tasks found in aria2 on startup.")
+        if !gidsToRemove.isEmpty {
+            print("Found \(gidsToRemove.count) zombie tasks in aria2 on startup. Purging...")
+            for gid in gidsToRemove {
+                print("Purging zombie task GID: \(gid)")
+                _ = try? await aria2.remove(gid)
+                _ = try? await aria2.purgeDownloadResult(gid)
+            }
+        } else {
+            print("No zombie tasks found in aria2 memory on startup.")
+        }
+        
+        // Always clean up download directory on startup to ensure no orphaned files remain.
+        clearDownloadDirectory()
+        
+        print("Startup cleanup finished.")
+    }
+
+    /// Safely clears all contents of the download directory.
+    private func clearDownloadDirectory() {
+        let fileManager = FileManager.default
+        let downloadDirURL = URL(fileURLWithPath: downloadDir).standardized
+        let destinationDirURL = URL(fileURLWithPath: destinationDir).standardized
+        
+        guard downloadDirURL.path.precomposedStringWithCanonicalMapping != destinationDirURL.path.precomposedStringWithCanonicalMapping else {
+            print("Warning: downloadDir and destinationDir are the same path (\(downloadDir)). Skipping full directory wipe to prevent data loss.")
             return
         }
         
-        print("Found \(gidsToRemove.count) zombie tasks in aria2 on startup. Purging...")
-        
-        let fileManager = FileManager.default
-        let downloadDirURL = URL(fileURLWithPath: downloadDir).standardized
-        
-        for gid in gidsToRemove {
-            print("Purging zombie task GID: \(gid)")
-            _ = try? await aria2.remove(gid)
-            _ = try? await aria2.purgeDownloadResult(gid)
-            
-            // Clean up related local files in downloadDir based on GID matching
-            if let contents = try? fileManager.contentsOfDirectory(at: downloadDirURL, includingPropertiesForKeys: nil, options: []) {
-                for itemURL in contents {
-                    let name = itemURL.lastPathComponent
-                    if name.contains(gid) {
-                        try? fileManager.removeItem(at: itemURL)
-                        print("Cleaned up zombie task leftover file: \(itemURL.path)")
-                    }
-                }
+        print("Clearing download directory: \(downloadDirURL.path)...")
+        do {
+            let contents = try fileManager.contentsOfDirectory(at: downloadDirURL, includingPropertiesForKeys: nil, options: [])
+            for itemURL in contents {
+                try fileManager.removeItem(at: itemURL)
+                print("Cleaned up leftover file/folder: \(itemURL.path)")
             }
+            print("Download directory cleared.")
+        } catch {
+            print("Failed to clear download directory contents: \(error)")
         }
-        print("Startup cleanup finished.")
     }
+
+    /// Handles explicit server initialization and cleanup requests from Telegram
+    private func handleResetCommand(chatId: Int64) async {
+        print("Reset command triggered by user from Chat ID: \(chatId)")
+        
+        do {
+            let msg = try await bot.sendMessage(
+                chatId: chatId,
+                text: "🔄 <b>서버 초기화 시작 중...</b>\n진행 중인 모든 다운로드를 중지하고 임시 파일을 삭제합니다."
+            )
+            
+            // 1. Clear aria2 tasks
+            var gidsToRemove: Set<String> = []
+            if let active = try? await aria2.tellActive() {
+                for task in active { gidsToRemove.insert(task.gid) }
+            }
+            if let waiting = try? await aria2.tellWaiting(offset: 0, num: 100) {
+                for task in waiting { gidsToRemove.insert(task.gid) }
+            }
+            if let stopped = try? await aria2.tellStopped(offset: 0, num: 100) {
+                for task in stopped { gidsToRemove.insert(task.gid) }
+            }
+            
+            for gid in gidsToRemove {
+                _ = try? await aria2.remove(gid)
+                _ = try? await aria2.purgeDownloadResult(gid)
+            }
+            
+            // 2. Clear bot local states
+            activeTasks.removeAll()
+            pendingQueue.removeAll()
+            
+            // 3. Clear download directory files
+            clearDownloadDirectory()
+            
+            _ = try? await bot.editMessageText(
+                chatId: chatId,
+                messageId: msg.messageId,
+                text: "✅ <b>서버 초기화 완료!</b>\n기존 정보 및 임시 파일이 모두 초기화되었습니다. 이제 새로운 다운로드를 시작하실 수 있습니다."
+            )
+        } catch {
+            print("Failed to execute reset command: \(error)")
+            try? await bot.sendMessage(chatId: chatId, text: "❌ 초기화 중 오류가 발생했습니다: \(error.localizedDescription)")
+        }
+    }
+
 
     /// Cleans up local files (like .aria2 or torrent file) and calls aria2.remove/purge to ensure no ghost files or tasks remain.
     private func cleanupDownloadResources(gid: String, status: Aria2Status? = nil) async {
