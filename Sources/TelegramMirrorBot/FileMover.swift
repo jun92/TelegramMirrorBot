@@ -15,8 +15,8 @@ public actor FileMover {
             self.progressHandler = progressHandler
         }
         
-        func incrementAndReport(by bytes: Int) async {
-            let (fraction, currentBytes, total, shouldReport): (Double, Int64, Int64, Bool) = lock.withLock {
+        func increment(by bytes: Int) -> Bool {
+            lock.withLock {
                 self.bytesCopied += Int64(bytes)
                 let now = Date()
                 let elapsed = now.timeIntervalSince(self.lastReportTime)
@@ -25,13 +25,16 @@ public actor FileMover {
                 if shouldReport {
                     self.lastReportTime = now
                 }
-                let fraction = Double(self.bytesCopied) / Double(self.totalSize)
-                return (fraction, self.bytesCopied, self.totalSize, shouldReport)
+                return shouldReport
             }
-            
-            if shouldReport {
-                await progressHandler(fraction, currentBytes, total)
+        }
+        
+        func report() async {
+            let (fraction, currentBytes, total) = lock.withLock {
+                let fraction = self.totalSize > 0 ? Double(self.bytesCopied) / Double(self.totalSize) : 1.0
+                return (fraction, self.bytesCopied, self.totalSize)
             }
+            await progressHandler(fraction, currentBytes, total)
         }
         
         func reportFinal() async {
@@ -126,51 +129,90 @@ public actor FileMover {
         }
         try fileManager.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
         
-        guard let inputStream = InputStream(url: src) else {
-            throw NSError(domain: "FileMover", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to open input stream for \(src.path)"])
-        }
-        guard let outputStream = OutputStream(url: dest, append: false) else {
-            throw NSError(domain: "FileMover", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to open output stream for \(dest.path)"])
-        }
-        
-        inputStream.open()
-        outputStream.open()
-        
-        defer {
-            inputStream.close()
-            outputStream.close()
-        }
-        
-        let bufferSize = 4 * 1024 * 1024 // 4MB Buffer
-        var buffer = [UInt8](repeating: 0, count: bufferSize)
-        
-        while inputStream.hasBytesAvailable {
-            try Task.checkCancellation()
-            
-            let bytesRead = inputStream.read(&buffer, maxLength: bufferSize)
-            if bytesRead < 0 {
-                if let error = inputStream.streamError {
-                    throw error
-                }
-                throw NSError(domain: "FileMover", code: 4, userInfo: [NSLocalizedDescriptionKey: "Stream read error"])
+        final class CancelToken: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _isCancelled = false
+            var isCancelled: Bool {
+                get { lock.withLock { _isCancelled } }
+                set { lock.withLock { _isCancelled = newValue } }
             }
-            if bytesRead == 0 {
-                break // EOF
-            }
-            
-            var bytesWritten = 0
-            while bytesWritten < bytesRead {
-                let written = outputStream.write(Array(buffer[bytesWritten..<bytesRead]), maxLength: bytesRead - bytesWritten)
-                if written < 0 {
-                    if let error = outputStream.streamError {
-                        throw error
+        }
+        let cancelToken = CancelToken()
+        
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                DispatchQueue.global(qos: .background).async {
+                    guard let inputStream = InputStream(url: src) else {
+                        continuation.resume(throwing: NSError(domain: "FileMover", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to open input stream for \(src.path)"]))
+                        return
                     }
-                    throw NSError(domain: "FileMover", code: 5, userInfo: [NSLocalizedDescriptionKey: "Stream write error"])
+                    guard let outputStream = OutputStream(url: dest, append: false) else {
+                        continuation.resume(throwing: NSError(domain: "FileMover", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to open output stream for \(dest.path)"]))
+                        return
+                    }
+                    
+                    inputStream.open()
+                    outputStream.open()
+                    
+                    defer {
+                        inputStream.close()
+                        outputStream.close()
+                    }
+                    
+                    let bufferSize = 512 * 1024 // 512KB Buffer (Optimized for SMB mount network, prevents blocking threads)
+                    var buffer = [UInt8](repeating: 0, count: bufferSize)
+                    
+                    while inputStream.hasBytesAvailable {
+                        if cancelToken.isCancelled {
+                            continuation.resume(throwing: CancellationError())
+                            return
+                        }
+                        
+                        let bytesRead = inputStream.read(&buffer, maxLength: bufferSize)
+                        if bytesRead < 0 {
+                            if let error = inputStream.streamError {
+                                continuation.resume(throwing: error)
+                            } else {
+                                continuation.resume(throwing: NSError(domain: "FileMover", code: 4, userInfo: [NSLocalizedDescriptionKey: "Stream read error"]))
+                            }
+                            return
+                        }
+                        if bytesRead == 0 {
+                            break // EOF
+                        }
+                        
+                        var bytesWritten = 0
+                        while bytesWritten < bytesRead {
+                            if cancelToken.isCancelled {
+                                continuation.resume(throwing: CancellationError())
+                                return
+                            }
+                            
+                            let written = outputStream.write(Array(buffer[bytesWritten..<bytesRead]), maxLength: bytesRead - bytesWritten)
+                            if written < 0 {
+                                if let error = outputStream.streamError {
+                                    continuation.resume(throwing: error)
+                                } else {
+                                    continuation.resume(throwing: NSError(domain: "FileMover", code: 5, userInfo: [NSLocalizedDescriptionKey: "Stream write error"]))
+                                }
+                                return
+                            }
+                            bytesWritten += written
+                        }
+                        
+                        let shouldReport = tracker.increment(by: bytesRead)
+                        if shouldReport {
+                            Task {
+                                await tracker.report()
+                            }
+                        }
+                    }
+                    
+                    continuation.resume()
                 }
-                bytesWritten += written
             }
-            
-            await tracker.incrementAndReport(by: bytesRead)
+        } onCancel: {
+            cancelToken.isCancelled = true
         }
     }
     
