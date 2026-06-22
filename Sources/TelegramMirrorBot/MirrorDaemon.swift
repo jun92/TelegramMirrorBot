@@ -119,15 +119,15 @@ public actor MirrorDaemon {
             
             if trimmed.hasPrefix("/start") {
                 let welcome = """
-                👋 안녕하세요! <b>Telegram Mirror Bot</b>입니다.
+                👋 Hello! This is the <b>Telegram Mirror Bot</b>.
                 
-                다운로드하려는 마그넷 링크나 토렌트 파일 URL을 전송하시면 다운로드가 즉시 시작됩니다.
-                진행 상황이 실시간으로 업데이트되며, 다운로드가 끝나면 지정된 경로로 파일이 자동 이동됩니다.
+                Send a magnet link or a torrent file URL to start downloading immediately.
+                Progress will be updated in real-time, and completed files will be automatically moved to the destination directory.
                 
-                💡 <b>사용 가능한 명령어:</b>
-                /start - 봇 시작 및 도움말 표시
-                /info - 현재 다운로드 진행 상태, 대기열 및 디스크 공간 정보 조회
-                /init, /reset, /clear - 서버 초기화 (진행 중인 다운로드 및 임시 파일 전체 삭제)
+                💡 <b>Available Commands:</b>
+                /start - Start the bot and show help instructions
+                /info - View current download progress, queue, and disk space details
+                /init, /reset, /clear - Initialize the server (stop all active downloads and purge temp files)
                 """
                 try? await bot.sendMessage(chatId: chatId, text: welcome)
                 return
@@ -243,7 +243,7 @@ public actor MirrorDaemon {
             
         } catch {
             print("Failed to add download: \(error)")
-            try? await bot.sendMessage(chatId: chatId, text: "❌ 다운로드 추가 실패: \(error.localizedDescription)")
+            try? await bot.sendMessage(chatId: chatId, text: "❌ Failed to add download: \(error.localizedDescription)")
         }
     }
     
@@ -317,7 +317,7 @@ public actor MirrorDaemon {
             print("Promoting task \(tempId) from pending queue to active download.")
             
             do {
-                let startingText = "⏳ <b>다운로드 시작 중...</b>"
+                let startingText = "⏳ <b>Starting download...</b>"
                 let newMsgId1 = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: startingText, replyMarkup: nil)
                 
                 let gid = try await aria2.addUri(task.uri, downloadDir: downloadDir)
@@ -326,12 +326,12 @@ public actor MirrorDaemon {
                 let fileName = getFileName(from: status)
                 
                 let loadingText = """
-                📥 **다운로드 준비 중...**
-                파일명: \(fileName)
+                📥 <b>Preparing download...</b>
+                File Name: \(fileName)
                 """
                 
                 let markup = InlineKeyboardMarkup(inlineKeyboard: [
-                    [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(gid)")]
+                    [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(gid)")]
                 ])
                 let newMsgId2 = await safeEditMessage(chatId: task.chatId, messageId: newMsgId1, text: loadingText, replyMarkup: markup)
                 
@@ -350,7 +350,7 @@ public actor MirrorDaemon {
                 downloadingCount += 1
             } catch {
                 print("Failed to promote task \(tempId): \(error)")
-                let failText = "❌ 대기열에서 다운로드 시작 실패: \(error.localizedDescription)"
+                let failText = "❌ Failed to start download from queue: \(error.localizedDescription)"
                 _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: failText, replyMarkup: nil)
                 activeTasks.removeValue(forKey: tempId)
             }
@@ -380,15 +380,15 @@ public actor MirrorDaemon {
             }
             
             let pendingText = """
-            ⏳ <b>다운로드 대기 중...</b>
+            ⏳ <b>Download Pending...</b>
             
-            📁 <b>파일명:</b> \(nameLabel.htmlEscaped)
-            📋 <b>대기 순서:</b> \(queuePos)번째 대기 중
+            📁 <b>File Name:</b> \(nameLabel.htmlEscaped)
+            📋 <b>Queue Position:</b> #\(queuePos) in queue
             """
             
             if pendingText != task.lastStatusText {
                 let markup = InlineKeyboardMarkup(inlineKeyboard: [
-                    [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(tempId)")]
+                    [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(tempId)")]
                 ])
                 let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: pendingText, replyMarkup: markup)
                 
@@ -418,19 +418,19 @@ public actor MirrorDaemon {
                 let etaStr = calculateETA(completed: completed, total: total, speed: speed)
                 
                 let text = """
-                📥 <b>다운로드 중...</b>
+                📥 <b>Downloading...</b>
                 
-                📁 <b>파일명:</b> \(fileName.htmlEscaped)
-                📊 <b>진행률:</b> [\(progressBar)] \(percent)%
-                💾 <b>크기:</b> \(sizeStr)
-                ⚡️ <b>속도:</b> \(speedStr)
-                ⏳ <b>남은 시간:</b> \(etaStr)
+                📁 <b>File Name:</b> \(fileName.htmlEscaped)
+                📊 <b>Progress:</b> [\(progressBar)] \(percent)%
+                💾 <b>Size:</b> \(sizeStr)
+                ⚡️ <b>Speed:</b> \(speedStr)
+                ⏳ <b>ETA:</b> \(etaStr)
                 """
                 
                 // Only edit if content changed to avoid spamming API
                 if text != task.lastStatusText {
                     let markup = InlineKeyboardMarkup(inlineKeyboard: [
-                        [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(task.gid)")]
+                        [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(task.gid)")]
                     ])
                     let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: text, replyMarkup: markup)
                     
@@ -457,7 +457,7 @@ public actor MirrorDaemon {
                         chatId: task.chatId,
                         messageId: task.messageId,
                         phase: .downloading,
-                        lastStatusText: "📥 <b>메타데이터 파싱 완료, 실제 다운로드 시작 중...</b>"
+                        lastStatusText: "📥 <b>Metadata parsed, starting actual download...</b>"
                     )
                     
                     // CRITICAL: Replace mapping synchronously BEFORE any await calls to prevent duplicate re-entrant monitoring
@@ -468,7 +468,7 @@ public actor MirrorDaemon {
                     try? await aria2.purgeDownloadResult(task.gid)
                     
                     let markup = InlineKeyboardMarkup(inlineKeyboard: [
-                        [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(newGid)")]
+                        [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(newGid)")]
                     ])
                     let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: newTask.lastStatusText, replyMarkup: markup)
                     
@@ -490,11 +490,11 @@ public actor MirrorDaemon {
                 }
                 
             } else if state == "error" {
-                let errMsg = status.errorMessage ?? "알 수 없는 에러"
+                let errMsg = status.errorMessage ?? "Unknown error"
                 let errCode = status.errorCode ?? "-1"
                 print("Aria2 download error for GID \(task.gid): (code \(errCode)) \(errMsg)")
                 
-                let text = "❌ 다운로드 중 에러가 발생했습니다: (\(errCode)) \(errMsg.htmlEscaped)"
+                let text = "❌ An error occurred during download: (\(errCode)) \(errMsg.htmlEscaped)"
                 _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: text, replyMarkup: nil)
                 
                 await cleanupDownloadResources(gid: task.gid, status: status)
@@ -506,7 +506,7 @@ public actor MirrorDaemon {
             updated.errorCount += 1
             if updated.errorCount >= 5 {
                 print("Task \(task.gid) failed consecutively 5 times. Pruning task to free slots.")
-                let failText = "❌ 다운로드 상태 조회 실패가 지속되어 작업을 강제 중단합니다: \(error.localizedDescription.htmlEscaped)"
+                let failText = "❌ Continuous query failures, forcing task termination: \(error.localizedDescription.htmlEscaped)"
                 _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: failText, replyMarkup: nil)
                 
                 await cleanupDownloadResources(gid: task.gid)
@@ -526,7 +526,7 @@ public actor MirrorDaemon {
         // If there are multiple files, aria2c puts them in a folder or has paths.
         // We find the common prefix or the parent directory of the first file.
         guard let firstFile = status.files.first, !firstFile.path.isEmpty else {
-            let failText = "❌ 다운로드 완료 후 로컬 파일을 찾을 수 없습니다."
+            let failText = "❌ Completed file could not be found locally."
             _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: failText, replyMarkup: nil)
             try? await aria2.purgeDownloadResult(task.gid)
             activeTasks.removeValue(forKey: task.gid)
@@ -570,9 +570,9 @@ public actor MirrorDaemon {
         
         // Inform Telegram that file-moving has started
         let movingStartText = """
-        🚚 <b>다운로드 완료! 파일 이동 중...</b>
-        📂 <b>파일명:</b> \(fileName.htmlEscaped)
-        진행률: [░░░░░░░░░░] 0.0%
+        🚚 <b>Download complete! Moving file...</b>
+        📂 <b>File Name:</b> \(fileName.htmlEscaped)
+        Progress: [░░░░░░░░░░] 0.0%
         """
         
         let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: movingStartText, replyMarkup: nil)
@@ -594,11 +594,11 @@ public actor MirrorDaemon {
                 let sizeStr = "\(self.formatSize(copiedBytes)) / \(self.formatSize(totalBytes))"
                 
                 let progressText = """
-                🚚 <b>파일 이동 중...</b>
+                🚚 <b>Moving file...</b>
                 
-                📂 <b>파일명:</b> \(fileName.htmlEscaped)
-                📊 <b>이동 진행률:</b> [\(progressBar)] \(percent)%
-                💾 <b>크기:</b> \(sizeStr)
+                📂 <b>File Name:</b> \(fileName.htmlEscaped)
+                📊 <b>Move Progress:</b> [\(progressBar)] \(percent)%
+                💾 <b>Size:</b> \(sizeStr)
                 """
                 
                 // Fetch latest message ID dynamically from the actor state to avoid using stale captured values
@@ -610,11 +610,11 @@ public actor MirrorDaemon {
             
             // Completed successfully!
             let successText = """
-            ✅ <b>다운로드 및 이동 완료!</b>
+            ✅ <b>Download & Move Complete!</b>
             
-            📁 <b>파일명:</b> \(fileName.htmlEscaped)
-            💾 <b>전체 크기:</b> \(formatSize(status.totalSize))
-            📍 <b>저장 경로:</b> \(targetURL.path.htmlEscaped)
+            📁 <b>File Name:</b> \(fileName.htmlEscaped)
+            💾 <b>Total Size:</b> \(formatSize(status.totalSize))
+            📍 <b>Save Path:</b> \(targetURL.path.htmlEscaped)
             """
             
             let finalMsgId = activeTasks[targetGid]?.messageId ?? updated.messageId
@@ -625,7 +625,7 @@ public actor MirrorDaemon {
             
         } catch {
             print("Error moving file: \(error)")
-            let failText = "❌ 파일 이동 중 에러가 발생했습니다: \(error.localizedDescription.htmlEscaped)"
+            let failText = "❌ Error occurred while moving file: \(error.localizedDescription.htmlEscaped)"
             let finalMsgId = activeTasks[targetGid]?.messageId ?? updated.messageId
             _ = await safeEditMessage(chatId: targetChatId, messageId: finalMsgId, text: failText, replyMarkup: nil)
             try? await aria2.purgeDownloadResult(targetGid)
@@ -653,7 +653,7 @@ public actor MirrorDaemon {
             }
             return fileURL.lastPathComponent
         }
-        return "알 수 없는 파일"
+        return "Unknown File"
     }
     
     nonisolated private func makeProgressBar(progress: Double, length: Int = 10) -> String {
@@ -690,7 +690,7 @@ public actor MirrorDaemon {
     }
     
     nonisolated private func calculateETA(completed: Int64, total: Int64, speed: Int64) -> String {
-        guard speed > 0 else { return "무한" }
+        guard speed > 0 else { return "Infinite" }
         let remainingBytes = total - completed
         guard remainingBytes > 0 else { return "00:00:00" }
         
@@ -775,7 +775,7 @@ public actor MirrorDaemon {
         do {
             let msg = try await bot.sendMessage(
                 chatId: chatId,
-                text: "🔄 <b>서버 초기화 시작 중...</b>\n진행 중인 모든 다운로드를 중지하고 임시 파일을 삭제합니다."
+                text: "🔄 <b>Starting server initialization...</b>\nStopping all active downloads and deleting temporary files."
             )
             
             // 1. Clear aria2 tasks
@@ -805,11 +805,11 @@ public actor MirrorDaemon {
             _ = try? await bot.editMessageText(
                 chatId: chatId,
                 messageId: msg.messageId,
-                text: "✅ <b>서버 초기화 완료!</b>\n기존 정보 및 임시 파일이 모두 초기화되었습니다. 이제 새로운 다운로드를 시작하실 수 있습니다."
+                text: "✅ <b>Server initialization complete!</b>\nAll downloads and temp files have been cleared. You can now start new downloads."
             )
         } catch {
             print("Failed to execute reset command: \(error)")
-            try? await bot.sendMessage(chatId: chatId, text: "❌ 초기화 중 오류가 발생했습니다: \(error.localizedDescription)")
+            try? await bot.sendMessage(chatId: chatId, text: "❌ An error occurred during initialization: \(error.localizedDescription)")
         }
     }
 
@@ -819,12 +819,12 @@ public actor MirrorDaemon {
             let attrs = try fileManager.attributesOfFileSystem(forPath: path)
             if let freeBytes = attrs[.systemFreeSize] as? Int64,
                let totalBytes = attrs[.systemSize] as? Int64 {
-                return "\(formatSize(freeBytes)) / \(formatSize(totalBytes)) 사용 가능"
+                return "\(formatSize(freeBytes)) / \(formatSize(totalBytes)) available"
             }
         } catch {
             print("Failed to get disk space for \(path): \(error)")
         }
-        return "조회 실패"
+        return "Check failed"
     }
 
     private func handleInfoCommand(chatId: Int64) async {
@@ -836,7 +836,7 @@ public actor MirrorDaemon {
         
         let downloadingTasks = tasks.values.filter { $0.phase == .downloading }
         if downloadingTasks.isEmpty {
-            activeLines.append("진행 중인 다운로드가 없습니다.")
+            activeLines.append("No downloads in progress.")
         } else {
             for task in downloadingTasks {
                 if let status = try? await aria2.tellStatus(task.gid) {
@@ -850,7 +850,7 @@ public actor MirrorDaemon {
                     let pct = String(format: "%.1f", progress * 100.0)
                     activeLines.append("• <b>\(name.htmlEscaped)</b>\n  [\(bar)] \(pct)% (\(formatSize(completed))/\(formatSize(total))) | ⚡️ \(formatSpeed(speed))")
                 } else {
-                    activeLines.append("• GID: \(task.gid) (상태 조회 대기 중)")
+                    activeLines.append("• GID: \(task.gid) (Waiting for status...)")
                 }
             }
         }
@@ -858,7 +858,7 @@ public actor MirrorDaemon {
         // 2. Get waiting tasks in queue
         var waitingLines: [String] = []
         if pendingQueue.isEmpty {
-            waitingLines.append("대기 중인 작업이 없습니다.")
+            waitingLines.append("No tasks in queue.")
         } else {
             for (index, tempId) in pendingQueue.enumerated() {
                 guard let task = tasks[tempId] else { continue }
@@ -882,7 +882,7 @@ public actor MirrorDaemon {
                 if queuePos <= 5 {
                     waitingLines.append("\(queuePos). <b>\(nameLabel.htmlEscaped)</b>")
                 } else if queuePos == 6 {
-                    waitingLines.append("... 외 \(pendingQueue.count - 5)개 대기 중")
+                    waitingLines.append("... and \(pendingQueue.count - 5) more waiting")
                     break
                 }
             }
@@ -895,15 +895,15 @@ public actor MirrorDaemon {
         let infoMessage = """
         ℹ️ <b>System & Mirror Status</b>
         
-        📥 <b>진행 중인 다운로드 (\(downloadingTasks.count)/\(maxConcurrentDownloads)):</b>
+        📥 <b>Active Downloads (\(downloadingTasks.count)/\(maxConcurrentDownloads)):</b>
         \(activeLines.joined(separator: "\n\n"))
         
-        ⏳ <b>대기열 (총 \(pendingQueue.count)개):</b>
+        ⏳ <b>Queue (Total \(pendingQueue.count)):</b>
         \(waitingLines.joined(separator: "\n"))
         
-        💾 <b>디스크 남은 공간:</b>
-        • 임시 폴더 (\(downloadDir)): \(tempDisk)
-        • 완료 폴더 (\(destinationDir)): \(completedDisk)
+        💾 <b>Remaining Disk Space:</b>
+        • Temp Folder (\(downloadDir)): \(tempDisk)
+        • Destination Folder (\(destinationDir)): \(completedDisk)
         """
         
         try? await bot.sendMessage(chatId: chatId, text: infoMessage)
