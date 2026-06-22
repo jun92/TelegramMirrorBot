@@ -179,6 +179,9 @@ public actor MirrorDaemon {
                 let status = try await aria2.tellStatus(gid)
                 let fileName = getFileName(from: status)
                 
+                // Edit the initial message to confirm it is added to aria2
+                _ = try? await bot.editMessageText(chatId: chatId, messageId: initialMsg.messageId, text: "✅ Added to aria2 daemon successfully.")
+                
                 let startingText = """
                 📥 <b>Download started:</b>
                 
@@ -189,13 +192,14 @@ public actor MirrorDaemon {
                     [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(gid)")]
                 ])
                 
-                try? await bot.editMessageText(chatId: chatId, messageId: initialMsg.messageId, text: startingText, replyMarkup: markup)
+                // Send a NEW message for Download started!
+                let startMsg = try await bot.sendMessage(chatId: chatId, text: startingText, replyMarkup: markup)
                 
                 activeTasks[gid] = MirrorTask(
                     gid: gid,
                     uri: uri,
                     chatId: chatId,
-                    messageId: initialMsg.messageId,
+                    messageId: startMsg.messageId,
                     phase: .downloading,
                     lastStatusText: startingText
                 )

@@ -283,6 +283,11 @@ public actor FileMover {
         await tracker.reportFinal()
         
         // Remove source after successful copy
-        try fileManager.removeItem(at: resolvedSource)
+        do {
+            try fileManager.removeItem(at: resolvedSource)
+            print("Successfully removed source path: \(resolvedSource.path)")
+        } catch {
+            print("Warning: Failed to remove source path: \(resolvedSource.path) - Error: \(error)")
+        }
     }
 }
