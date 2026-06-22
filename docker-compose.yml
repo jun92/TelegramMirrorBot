@@ -23,7 +23,8 @@ services:
     restart: unless-stopped
 
   bot:
-    image: ghcr.io/jun92/telegrammirrorbot:latest
+    build: .
+    image: telegram-mirror-bot:local
     container_name: telegram-mirror-bot
     depends_on:
       - aria2

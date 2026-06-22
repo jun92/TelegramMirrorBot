@@ -88,6 +88,47 @@ public struct InlineKeyboardButton: Codable, Sendable {
     }
 }
 
+public struct ReplyKeyboardMarkup: Codable, Sendable {
+    public let keyboard: [[KeyboardButton]]
+    public let resizeKeyboard: Bool?
+    public let oneTimeKeyboard: Bool?
+    
+    enum CodingKeys: String, CodingKey {
+        case keyboard
+        case resizeKeyboard = "resize_keyboard"
+        case oneTimeKeyboard = "one_time_keyboard"
+    }
+    
+    public init(keyboard: [[KeyboardButton]], resizeKeyboard: Bool? = true, oneTimeKeyboard: Bool? = nil) {
+        self.keyboard = keyboard
+        self.resizeKeyboard = resizeKeyboard
+        self.oneTimeKeyboard = oneTimeKeyboard
+    }
+}
+
+public struct KeyboardButton: Codable, Sendable {
+    public let text: String
+    
+    public init(text: String) {
+        self.text = text
+    }
+}
+
+public enum TelegramReplyMarkup: Encodable, Sendable {
+    case inline(InlineKeyboardMarkup)
+    case reply(ReplyKeyboardMarkup)
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .inline(let markup):
+            try container.encode(markup)
+        case .reply(let markup):
+            try container.encode(markup)
+        }
+    }
+}
+
 public struct TelegramBotError: Error, CustomStringConvertible, LocalizedError {
     public let code: Int
     public let message: String
@@ -181,6 +222,32 @@ public actor TelegramBot {
             let text: String
             let parseMode: String?
             let replyMarkup: InlineKeyboardMarkup?
+            
+            enum CodingKeys: String, CodingKey {
+                case chatId = "chat_id"
+                case text
+                case parseMode = "parse_mode"
+                case replyMarkup = "reply_markup"
+            }
+        }
+        
+        let params = Params(chatId: chatId, text: text, parseMode: parseMode, replyMarkup: replyMarkup)
+        return try await makeRequest(method: "sendMessage", params: params)
+    }
+    
+    /// Send a text message to a chat with reply keyboard markup (bottom menu buttons)
+    @discardableResult
+    public func sendMessageWithReplyKeyboard(
+        chatId: Int64,
+        text: String,
+        parseMode: String? = "HTML",
+        replyMarkup: ReplyKeyboardMarkup
+    ) async throws -> TelegramMessage {
+        struct Params: Encodable {
+            let chatId: Int64
+            let text: String
+            let parseMode: String?
+            let replyMarkup: ReplyKeyboardMarkup
             
             enum CodingKeys: String, CodingKey {
                 case chatId = "chat_id"

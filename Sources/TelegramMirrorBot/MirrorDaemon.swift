@@ -129,7 +129,10 @@ public actor MirrorDaemon {
                 /info - View current download progress, queue, and disk space details
                 /init, /reset, /clear - Initialize the server (stop all active downloads and purge temp files)
                 """
-                try? await bot.sendMessage(chatId: chatId, text: welcome)
+                let keyboard = ReplyKeyboardMarkup(keyboard: [
+                    [KeyboardButton(text: "/info"), KeyboardButton(text: "/clear")]
+                ])
+                try? await bot.sendMessageWithReplyKeyboard(chatId: chatId, text: welcome, replyMarkup: keyboard)
                 return
             }
             
