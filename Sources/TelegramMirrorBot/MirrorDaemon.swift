@@ -149,7 +149,7 @@ public actor MirrorDaemon {
             if isMagnet || isHttp {
                 await handleNewDownloadRequest(uri: trimmed, chatId: chatId)
             } else {
-                try? await bot.sendMessage(chatId: chatId, text: "❌ 올바른 마그넷 링크 또는 파일 다운로드 링크를 입력해 주세요.")
+                try? await bot.sendMessage(chatId: chatId, text: "❌ Please enter a valid magnet link or file download URL.")
             }
         }
         
@@ -168,7 +168,7 @@ public actor MirrorDaemon {
             let downloadingCount = activeTasks.values.filter { $0.phase == .downloading }.count
             
             if downloadingCount < maxConcurrentDownloads {
-                let initialMsg = try await bot.sendMessage(chatId: chatId, text: "⏳ aria2c 데몬에 요청을 추가하는 중...")
+                let initialMsg = try await bot.sendMessage(chatId: chatId, text: "⏳ Adding download request to aria2c daemon...")
                 
                 let gid = try await aria2.addUri(uri, downloadDir: downloadDir)
                 
@@ -177,12 +177,12 @@ public actor MirrorDaemon {
                 let fileName = getFileName(from: status)
                 
                 let loadingText = """
-                📥 <b>다운로드 준비 중...</b>
-                파일명: \(fileName.htmlEscaped)
+                📥 <b>Preparing download...</b>
+                File Name: \(fileName.htmlEscaped)
                 """
                 
                 let markup = InlineKeyboardMarkup(inlineKeyboard: [
-                    [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(gid)")]
+                    [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(gid)")]
                 ])
                 
                 try? await bot.editMessageText(chatId: chatId, messageId: initialMsg.messageId, text: loadingText, replyMarkup: markup)
@@ -197,7 +197,7 @@ public actor MirrorDaemon {
                 )
                 print("Successfully added download task. GID: \(gid), File: \(fileName)")
             } else {
-                let initialMsg = try await bot.sendMessage(chatId: chatId, text: "⏳ 대기열 추가 중...")
+                let initialMsg = try await bot.sendMessage(chatId: chatId, text: "⏳ Adding to queue...")
                 let tempId = "pending_" + UUID().uuidString
                 let queuePos = pendingQueue.count + 1
                 
@@ -217,14 +217,14 @@ public actor MirrorDaemon {
                 }
                 
                 let pendingText = """
-                ⏳ <b>다운로드 대기 중...</b>
+                ⏳ <b>Download Pending...</b>
                 
-                📁 <b>파일명:</b> \(nameLabel.htmlEscaped)
-                📋 <b>대기 순서:</b> \(queuePos)번째 대기 중
+                📁 <b>File Name:</b> \(nameLabel.htmlEscaped)
+                📋 <b>Queue Position:</b> #\(queuePos) in queue
                 """
                 
                 let markup = InlineKeyboardMarkup(inlineKeyboard: [
-                    [InlineKeyboardButton(text: "❌ 취소", callbackData: "cancel:\(tempId)")]
+                    [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(tempId)")]
                 ])
                 
                 try? await bot.editMessageText(chatId: chatId, messageId: initialMsg.messageId, text: pendingText, replyMarkup: markup)
@@ -249,7 +249,7 @@ public actor MirrorDaemon {
     
     private func handleCancelRequest(gid: String, callbackQueryId: String) async {
         guard var task = activeTasks[gid] else {
-            try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "이미 완료되었거나 취소된 작업입니다.")
+            try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "This task is already completed or cancelled.")
             return
         }
         
@@ -258,13 +258,13 @@ public actor MirrorDaemon {
             pendingQueue.removeAll { $0 == gid }
             activeTasks.removeValue(forKey: gid)
             
-            let cancelledText = "❌ 대기 중 취소되었습니다."
+            let cancelledText = "❌ Cancelled while pending."
             _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
             
             // Recalculate queue positions
             await updatePendingTasksQueuePositions()
             
-            try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "대기열에서 성공적으로 취소되었습니다.")
+            try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "Successfully cancelled from the queue.")
             print("Pending task cancelled by user. TempID: \(gid)")
             return
         }
@@ -276,12 +276,12 @@ public actor MirrorDaemon {
         task.phase = .cancelled
         activeTasks[gid] = task
         
-        let cancelledText = "❌ 사용자에 의해 다운로드가 취소되었습니다."
+        let cancelledText = "❌ Download cancelled by user."
         _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: cancelledText, replyMarkup: nil)
         
         activeTasks.removeValue(forKey: gid)
         
-        try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "성공적으로 취소되었습니다.")
+        try? await bot.answerCallbackQuery(callbackQueryId: callbackQueryId, text: "Successfully cancelled.")
         print("Task cancelled by user. GID: \(gid)")
     }
     
