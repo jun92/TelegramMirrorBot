@@ -176,16 +176,17 @@ public actor MirrorDaemon {
                 let status = try await aria2.tellStatus(gid)
                 let fileName = getFileName(from: status)
                 
-                let loadingText = """
-                📥 <b>Preparing download...</b>
-                File Name: \(fileName.htmlEscaped)
+                let startingText = """
+                📥 <b>Download started:</b>
+                
+                📁 <b>File Name:</b> \(fileName.htmlEscaped)
                 """
                 
                 let markup = InlineKeyboardMarkup(inlineKeyboard: [
                     [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(gid)")]
                 ])
                 
-                try? await bot.editMessageText(chatId: chatId, messageId: initialMsg.messageId, text: loadingText, replyMarkup: markup)
+                try? await bot.editMessageText(chatId: chatId, messageId: initialMsg.messageId, text: startingText, replyMarkup: markup)
                 
                 activeTasks[gid] = MirrorTask(
                     gid: gid,
@@ -193,7 +194,7 @@ public actor MirrorDaemon {
                     chatId: chatId,
                     messageId: initialMsg.messageId,
                     phase: .downloading,
-                    lastStatusText: loadingText
+                    lastStatusText: startingText
                 )
                 print("Successfully added download task. GID: \(gid), File: \(fileName)")
             } else {
@@ -317,31 +318,38 @@ public actor MirrorDaemon {
             print("Promoting task \(tempId) from pending queue to active download.")
             
             do {
-                let startingText = "⏳ <b>Starting download...</b>"
-                let newMsgId1 = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: startingText, replyMarkup: nil)
+                // Remove Cancel button from the old pending message
+                _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: "⏳ <b>Download Pending... (Started)</b>", replyMarkup: nil)
                 
                 let gid = try await aria2.addUri(task.uri, downloadDir: downloadDir)
                 
                 let status = try await aria2.tellStatus(gid)
                 let fileName = getFileName(from: status)
                 
-                let loadingText = """
-                📥 <b>Preparing download...</b>
-                File Name: \(fileName)
+                let startingText = """
+                📥 <b>Download started:</b>
+                
+                📁 <b>File Name:</b> \(fileName.htmlEscaped)
                 """
                 
                 let markup = InlineKeyboardMarkup(inlineKeyboard: [
                     [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(gid)")]
                 ])
-                let newMsgId2 = await safeEditMessage(chatId: task.chatId, messageId: newMsgId1, text: loadingText, replyMarkup: markup)
+                
+                let newMsgId: Int
+                if let newMsg = try? await bot.sendMessage(chatId: task.chatId, text: startingText, replyMarkup: markup) {
+                    newMsgId = newMsg.messageId
+                } else {
+                    newMsgId = task.messageId
+                }
                 
                 let newTask = MirrorTask(
                     gid: gid,
                     uri: task.uri,
                     chatId: task.chatId,
-                    messageId: newMsgId2,
+                    messageId: newMsgId,
                     phase: .downloading,
-                    lastStatusText: loadingText
+                    lastStatusText: startingText
                 )
                 
                 activeTasks.removeValue(forKey: tempId)
@@ -407,39 +415,10 @@ public actor MirrorDaemon {
             if state == "active" || state == "waiting" {
                 let fileName = getFileName(from: status)
                 let progress = status.progress
-                let speed = status.speed
-                let total = status.totalSize
-                let completed = status.completedSize
-                
-                let progressBar = makeProgressBar(progress: progress)
                 let percent = String(format: "%.1f", progress * 100.0)
-                let speedStr = formatSpeed(speed)
-                let sizeStr = "\(formatSize(completed)) / \(formatSize(total))"
-                let etaStr = calculateETA(completed: completed, total: total, speed: speed)
+                print("Task \(task.gid) (\(fileName)) downloading: \(percent)%")
                 
-                let text = """
-                📥 <b>Downloading...</b>
-                
-                📁 <b>File Name:</b> \(fileName.htmlEscaped)
-                📊 <b>Progress:</b> [\(progressBar)] \(percent)%
-                💾 <b>Size:</b> \(sizeStr)
-                ⚡️ <b>Speed:</b> \(speedStr)
-                ⏳ <b>ETA:</b> \(etaStr)
-                """
-                
-                // Only edit if content changed to avoid spamming API
-                if text != task.lastStatusText {
-                    let markup = InlineKeyboardMarkup(inlineKeyboard: [
-                        [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(task.gid)")]
-                    ])
-                    let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: text, replyMarkup: markup)
-                    
-                    var updated = task
-                    updated.lastStatusText = text
-                    updated.messageId = newMsgId
-                    updated.errorCount = 0 // Reset error count on successful communication
-                    activeTasks[task.gid] = updated
-                } else if task.errorCount > 0 {
+                if task.errorCount > 0 {
                     var updated = task
                     updated.errorCount = 0
                     activeTasks[task.gid] = updated
@@ -450,14 +429,37 @@ public actor MirrorDaemon {
                 if let followedBy = status.followedBy, !followedBy.isEmpty, let newGid = followedBy.first {
                     print("Metadata download complete for GID: \(task.gid). Switching to actual download GID: \(newGid)")
                     
+                    // Remove keyboard from the old message
+                    _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: "📥 <b>Metadata parsed</b>", replyMarkup: nil)
+                    
+                    let newStatus = (try? await aria2.tellStatus(newGid)) ?? status
+                    let fileName = getFileName(from: newStatus)
+                    
+                    let newText = """
+                    📥 <b>Download started (Metadata parsed):</b>
+                    
+                    📁 <b>File Name:</b> \(fileName.htmlEscaped)
+                    """
+                    
+                    let markup = InlineKeyboardMarkup(inlineKeyboard: [
+                        [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(newGid)")]
+                    ])
+                    
+                    let newMsgId: Int
+                    if let newMsg = try? await bot.sendMessage(chatId: task.chatId, text: newText, replyMarkup: markup) {
+                        newMsgId = newMsg.messageId
+                    } else {
+                        newMsgId = task.messageId
+                    }
+                    
                     // Create a new task mapping the new GID
                     let newTask = MirrorTask(
                         gid: newGid,
                         uri: task.uri,
                         chatId: task.chatId,
-                        messageId: task.messageId,
+                        messageId: newMsgId,
                         phase: .downloading,
-                        lastStatusText: "📥 <b>Metadata parsed, starting actual download...</b>"
+                        lastStatusText: newText
                     )
                     
                     // CRITICAL: Replace mapping synchronously BEFORE any await calls to prevent duplicate re-entrant monitoring
@@ -466,18 +468,10 @@ public actor MirrorDaemon {
                     
                     // Clean up metadata result in aria2 (async)
                     try? await aria2.purgeDownloadResult(task.gid)
-                    
-                    let markup = InlineKeyboardMarkup(inlineKeyboard: [
-                        [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(newGid)")]
-                    ])
-                    let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: newTask.lastStatusText, replyMarkup: markup)
-                    
-                    // Persist final messageId if changed by safeEditMessage
-                    if var currentTask = activeTasks[newGid] {
-                        currentTask.messageId = newMsgId
-                        activeTasks[newGid] = currentTask
-                    }
                 } else {
+                    // Remove keyboard from the old message
+                    _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: "📥 <b>Download started</b>", replyMarkup: nil)
+                    
                     // CRITICAL: Update phase synchronously BEFORE calling the async handleDownloadComplete
                     var movingTask = task
                     movingTask.phase = .moving
@@ -568,14 +562,27 @@ public actor MirrorDaemon {
         
         print("Starting file move from \(resolvedSourceURL.path) to \(targetURL.path)")
         
-        // Inform Telegram that file-moving has started
-        let movingStartText = """
-        🚚 <b>Download complete! Moving file...</b>
-        📂 <b>File Name:</b> \(fileName.htmlEscaped)
-        Progress: [░░░░░░░░░░] 0.0%
-        """
+        // 1. Send NEW message: Download Complete
+        let downloadCompleteText = """
+        📥 <b>Download complete:</b>
         
-        let newMsgId = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: movingStartText, replyMarkup: nil)
+        📁 <b>File Name:</b> \(fileName.htmlEscaped)
+        💾 <b>Total Size:</b> \(formatSize(status.totalSize))
+        """
+        _ = try? await bot.sendMessage(chatId: task.chatId, text: downloadCompleteText)
+        
+        // 2. Send NEW message: File Move Started
+        let movingStartText = """
+        🚚 <b>Moving file...</b>
+        
+        📁 <b>File Name:</b> \(fileName.htmlEscaped)
+        """
+        let newMsgId: Int
+        if let newMsg = try? await bot.sendMessage(chatId: task.chatId, text: movingStartText) {
+            newMsgId = newMsg.messageId
+        } else {
+            newMsgId = task.messageId
+        }
         updated.messageId = newMsgId
         activeTasks[task.gid] = updated
         
@@ -586,26 +593,7 @@ public actor MirrorDaemon {
         // Start copying process
         do {
             try await mover.move(from: resolvedSourceURL, to: targetURL) { progress, copiedBytes, totalBytes in
-                // Skip progress updates for final 100% to avoid race condition with the success message
-                guard progress < 0.999 else { return }
-                
-                let progressBar = self.makeProgressBar(progress: progress)
-                let percent = String(format: "%.1f", progress * 100.0)
-                let sizeStr = "\(self.formatSize(copiedBytes)) / \(self.formatSize(totalBytes))"
-                
-                let progressText = """
-                🚚 <b>Moving file...</b>
-                
-                📂 <b>File Name:</b> \(fileName.htmlEscaped)
-                📊 <b>Move Progress:</b> [\(progressBar)] \(percent)%
-                💾 <b>Size:</b> \(sizeStr)
-                """
-                
-                // Fetch latest message ID dynamically from the actor state to avoid using stale captured values
-                if let currentMessageId = await self.getLatestMessageId(for: targetGid) {
-                    let updatedMsgId = await self.safeEditMessage(chatId: targetChatId, messageId: currentMessageId, text: progressText, replyMarkup: nil)
-                    await self.updateTaskMessageId(gid: targetGid, messageId: updatedMsgId)
-                }
+                // No-op: Do not update progress on Telegram
             }
             
             // Completed successfully!
@@ -617,8 +605,7 @@ public actor MirrorDaemon {
             📍 <b>Save Path:</b> \(targetURL.path.htmlEscaped)
             """
             
-            let finalMsgId = activeTasks[targetGid]?.messageId ?? updated.messageId
-            _ = await safeEditMessage(chatId: targetChatId, messageId: finalMsgId, text: successText, replyMarkup: nil)
+            _ = try? await bot.sendMessage(chatId: targetChatId, text: successText)
             try? await aria2.purgeDownloadResult(targetGid)
             activeTasks.removeValue(forKey: targetGid)
             print("Task completed successfully. GID: \(targetGid)")
@@ -626,8 +613,7 @@ public actor MirrorDaemon {
         } catch {
             print("Error moving file: \(error)")
             let failText = "❌ Error occurred while moving file: \(error.localizedDescription.htmlEscaped)"
-            let finalMsgId = activeTasks[targetGid]?.messageId ?? updated.messageId
-            _ = await safeEditMessage(chatId: targetChatId, messageId: finalMsgId, text: failText, replyMarkup: nil)
+            _ = try? await bot.sendMessage(chatId: targetChatId, text: failText)
             try? await aria2.purgeDownloadResult(targetGid)
             activeTasks.removeValue(forKey: targetGid)
         }
