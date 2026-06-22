@@ -856,7 +856,23 @@ public actor MirrorDaemon {
             }
         }
         
-        // 2. Get waiting tasks in queue
+        // 2. Get active moving tasks info
+        var movingLines: [String] = []
+        let movingTasks = tasks.values.filter { $0.phase == .moving }
+        if movingTasks.isEmpty {
+            movingLines.append("No files currently moving.")
+        } else {
+            for task in movingTasks {
+                if let status = try? await aria2.tellStatus(task.gid) {
+                    let name = getFileName(from: status)
+                    movingLines.append("• <b>\(name.htmlEscaped)</b> (Moving...)")
+                } else {
+                    movingLines.append("• GID: \(task.gid) (Moving...)")
+                }
+            }
+        }
+        
+        // 3. Get waiting tasks in queue
         var waitingLines: [String] = []
         if pendingQueue.isEmpty {
             waitingLines.append("No tasks in queue.")
@@ -889,7 +905,7 @@ public actor MirrorDaemon {
             }
         }
         
-        // 3. Get Disk Space
+        // 4. Get Disk Space
         let tempDisk = getFreeDiskSpace(at: downloadDir)
         let completedDisk = getFreeDiskSpace(at: destinationDir)
         
@@ -898,6 +914,9 @@ public actor MirrorDaemon {
         
         📥 <b>Active Downloads (\(downloadingTasks.count)/\(maxConcurrentDownloads)):</b>
         \(activeLines.joined(separator: "\n\n"))
+        
+        🚚 <b>Moving Files (\(movingTasks.count)):</b>
+        \(movingLines.joined(separator: "\n"))
         
         ⏳ <b>Queue (Total \(pendingQueue.count)):</b>
         \(waitingLines.joined(separator: "\n"))
