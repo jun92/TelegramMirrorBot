@@ -130,18 +130,18 @@ public actor MirrorDaemon {
                 /init, /reset, /clear - Initialize the server (stop all active downloads and purge temp files)
                 """
                 let keyboard = ReplyKeyboardMarkup(keyboard: [
-                    [KeyboardButton(text: "/info"), KeyboardButton(text: "/clear")]
+                    [KeyboardButton(text: "info"), KeyboardButton(text: "clear")]
                 ])
                 try? await bot.sendMessageWithReplyKeyboard(chatId: chatId, text: welcome, replyMarkup: keyboard)
                 return
             }
             
-            if trimmed.hasPrefix("/info") {
+            if trimmed.hasPrefix("/info") || trimmed == "info" {
                 await handleInfoCommand(chatId: chatId)
                 return
             }
             
-            if trimmed.hasPrefix("/init") || trimmed.hasPrefix("/reset") || trimmed.hasPrefix("/clear") {
+            if trimmed.hasPrefix("/init") || trimmed.hasPrefix("/reset") || trimmed.hasPrefix("/clear") || trimmed == "clear" {
                 await handleResetCommand(chatId: chatId)
                 return
             }
