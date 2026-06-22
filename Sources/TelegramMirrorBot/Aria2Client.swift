@@ -162,14 +162,14 @@ public actor Aria2Client {
     
     /// Returns a list of active downloads.
     public func tellActive() async throws -> [Aria2Status] {
-        let keys = ["gid", "status", "files"]
+        let keys = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "errorCode", "errorMessage", "files", "followedBy"]
         let extra: [AnyEncodable] = [AnyEncodable(keys)]
         return try await sendRequest(method: "aria2.tellActive", params: buildParams(extra))
     }
     
     /// Returns a list of waiting or paused downloads.
     public func tellWaiting(offset: Int, num: Int) async throws -> [Aria2Status] {
-        let keys = ["gid", "status", "files"]
+        let keys = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "errorCode", "errorMessage", "files", "followedBy"]
         let extra: [AnyEncodable] = [
             AnyEncodable(offset),
             AnyEncodable(num),
@@ -180,7 +180,7 @@ public actor Aria2Client {
     
     /// Returns a list of stopped (completed or failed) downloads.
     public func tellStopped(offset: Int, num: Int) async throws -> [Aria2Status] {
-        let keys = ["gid", "status", "files"]
+        let keys = ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "errorCode", "errorMessage", "files", "followedBy"]
         let extra: [AnyEncodable] = [
             AnyEncodable(offset),
             AnyEncodable(num),

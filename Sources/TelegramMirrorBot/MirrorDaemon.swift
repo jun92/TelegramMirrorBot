@@ -432,45 +432,53 @@ public actor MirrorDaemon {
                 if let followedBy = status.followedBy, !followedBy.isEmpty, let newGid = followedBy.first {
                     print("Metadata download complete for GID: \(task.gid). Switching to actual download GID: \(newGid)")
                     
-                    // Remove keyboard from the old message
-                    _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: "📥 <b>Metadata parsed</b>", replyMarkup: nil)
-                    
-                    let newStatus = (try? await aria2.tellStatus(newGid)) ?? status
-                    let fileName = getFileName(from: newStatus)
-                    
-                    let newText = """
-                    📥 <b>Download started (Metadata parsed):</b>
-                    
-                    📁 <b>File Name:</b> \(fileName.htmlEscaped)
-                    """
-                    
-                    let markup = InlineKeyboardMarkup(inlineKeyboard: [
-                        [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(newGid)")]
-                    ])
-                    
-                    let newMsgId: Int
-                    if let newMsg = try? await bot.sendMessage(chatId: task.chatId, text: newText, replyMarkup: markup) {
-                        newMsgId = newMsg.messageId
-                    } else {
-                        newMsgId = task.messageId
-                    }
-                    
-                    // Create a new task mapping the new GID
-                    let newTask = MirrorTask(
+                    // CRITICAL: Replace mapping synchronously BEFORE any await calls to prevent duplicate re-entrant monitoring
+                    let tempTask = MirrorTask(
                         gid: newGid,
                         uri: task.uri,
                         chatId: task.chatId,
-                        messageId: newMsgId,
+                        messageId: task.messageId, // Temporarily map to old message ID
                         phase: .downloading,
-                        lastStatusText: newText
+                        lastStatusText: "📥 <b>Metadata parsed, starting actual download...</b>"
                     )
-                    
-                    // CRITICAL: Replace mapping synchronously BEFORE any await calls to prevent duplicate re-entrant monitoring
                     activeTasks.removeValue(forKey: task.gid)
-                    activeTasks[newGid] = newTask
+                    activeTasks[newGid] = tempTask
                     
-                    // Clean up metadata result in aria2 (async)
-                    try? await aria2.purgeDownloadResult(task.gid)
+                    let targetChatId = task.chatId
+                    let oldMsgId = task.messageId
+                    let oldGid = task.gid
+                    
+                    // Perform async Telegram updates and Aria2 purging in a non-blocking background task
+                    Task {
+                        // Remove keyboard from the old message
+                        _ = await self.safeEditMessage(chatId: targetChatId, messageId: oldMsgId, text: "📥 <b>Metadata parsed</b>", replyMarkup: nil)
+                        
+                        let newStatus = (try? await self.aria2.tellStatus(newGid)) ?? status
+                        let fileName = self.getFileName(from: newStatus)
+                        
+                        let newText = """
+                        📥 <b>Download started (Metadata parsed):</b>
+                        
+                        📁 <b>File Name:</b> \(fileName.htmlEscaped)
+                        """
+                        
+                        let markup = InlineKeyboardMarkup(inlineKeyboard: [
+                            [InlineKeyboardButton(text: "❌ Cancel", callbackData: "cancel:\(newGid)")]
+                        ])
+                        
+                        let newMsgId: Int
+                        if let newMsg = try? await self.bot.sendMessage(chatId: targetChatId, text: newText, replyMarkup: markup) {
+                            newMsgId = newMsg.messageId
+                        } else {
+                            newMsgId = oldMsgId
+                        }
+                        
+                        // Update task message ID and status text on the actor context safely
+                        self.updateTaskAfterMetadataParsed(newGid: newGid, newMsgId: newMsgId, newText: newText)
+                        
+                        // Clean up metadata result in aria2 (async)
+                        try? await self.aria2.purgeDownloadResult(oldGid)
+                    }
                 } else {
                     // Remove keyboard from the old message
                     _ = await safeEditMessage(chatId: task.chatId, messageId: task.messageId, text: "📥 <b>Download started</b>", replyMarkup: nil)
@@ -999,6 +1007,14 @@ public actor MirrorDaemon {
         if var task = activeTasks[gid] {
             task.messageId = messageId
             activeTasks[gid] = task
+        }
+    }
+    
+    private func updateTaskAfterMetadataParsed(newGid: String, newMsgId: Int, newText: String) {
+        if var task = activeTasks[newGid] {
+            task.messageId = newMsgId
+            task.lastStatusText = newText
+            activeTasks[newGid] = task
         }
     }
     
