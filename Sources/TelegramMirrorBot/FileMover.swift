@@ -124,9 +124,8 @@ public actor FileMover {
     
     private func copyFile(from src: URL, to dest: URL, tracker: ProgressTracker) async throws {
         let fileManager = FileManager.default
-        if fileManager.fileExists(atPath: dest.path) {
-            try fileManager.removeItem(at: dest)
-        }
+        // Try to remove destination anyway to handle broken symlinks or existing files
+        try? fileManager.removeItem(at: dest)
         try fileManager.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
         
         final class CancelToken: @unchecked Sendable {
@@ -244,8 +243,22 @@ public actor FileMover {
         
         guard totalSize > 0 else {
             // Empty folder or 0-byte file: move instantly using FileManager
-            if fileManager.fileExists(atPath: resolvedDestination.path) {
-                try fileManager.removeItem(at: resolvedDestination)
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: resolvedDestination.path, isDirectory: &isDir) {
+                if !isDir.boolValue {
+                    try? fileManager.removeItem(at: resolvedDestination)
+                } else {
+                    let srcValues = try? resolvedSource.resourceValues(forKeys: [.isDirectoryKey])
+                    if srcValues?.isDirectory == true {
+                        try? fileManager.removeItem(at: resolvedSource)
+                        await tracker.reportEmpty()
+                        return
+                    } else {
+                        try? fileManager.removeItem(at: resolvedDestination)
+                    }
+                }
+            } else {
+                try? fileManager.removeItem(at: resolvedDestination)
             }
             try fileManager.createDirectory(at: resolvedDestination.deletingLastPathComponent(), withIntermediateDirectories: true)
             try fileManager.moveItem(at: resolvedSource, to: resolvedDestination)
@@ -262,6 +275,14 @@ public actor FileMover {
             try await copyFile(from: resolvedSource, to: resolvedDestination, tracker: tracker)
         } else if resourceValues.isDirectory == true {
             // Create destination root directory
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: resolvedDestination.path, isDirectory: &isDir) {
+                if !isDir.boolValue {
+                    try? fileManager.removeItem(at: resolvedDestination)
+                }
+            } else {
+                try? fileManager.removeItem(at: resolvedDestination)
+            }
             try fileManager.createDirectory(at: resolvedDestination, withIntermediateDirectories: true)
             
             guard let enumerator = fileManager.enumerator(at: resolvedSource, includingPropertiesForKeys: [.isRegularFileKey], options: []) else {
